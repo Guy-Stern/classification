@@ -10,6 +10,21 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
+# Air-gapped installs: force HF / transformers offline mode BEFORE any of the
+# transitive imports below pull in transformers/huggingface_hub. Once those
+# libs initialize, they cache the env state — flipping it later has no effect.
+# launcher.py / start.bat already set this for the GUI path; this is the
+# belt-and-braces fallback for direct `python -m uvicorn ...` invocations.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+if "HF_HOME" not in os.environ:
+    # Resolve <project_root>/models/hf_cache where project_root is the dir
+    # containing this main.py's grandparent (backend/app/main.py → repo root).
+    _proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    _bundled_hf = os.path.join(_proj_root, "models", "hf_cache")
+    if os.path.isdir(_bundled_hf):
+        os.environ["HF_HOME"] = _bundled_hf
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse

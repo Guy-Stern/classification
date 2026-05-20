@@ -490,18 +490,29 @@ def apply_v6_masks_to_classification(
     # ── Phase 0: Mask acquisition ──────────────────────────────────────────
     # Water is shapefile-only by design (sam3_enabled=False) — never detected
     # by SAM3 or KMeans color matching.  No shapefile -> no water painted.
+    #
+    # For each feature type we ask shapefile_resolver to convert a possibly-
+    # huge configured shapefile (or set of regional shapefiles) into a single
+    # trimmed .shp covering only the ortho's bounds. An explicit per-call
+    # path (e.g. CLI override) wins outright. None means "no shapefile" —
+    # the caller falls back to SAM3 / no-mask via _acquire_mask.
+    from . import shapefile_resolver
+
+    water_resolved = shapefile_resolver.resolve_shapefile(raster_path, "water", water_shapefile)
     water_mask_path, water_source = _acquire_mask(
-        raster_path, "water", water_shapefile, sam3_enabled=False,
+        raster_path, "water", water_resolved, sam3_enabled=False,
         progress_callback=_phase_cb("Water (shapefile)"),
         mask_output_dir=mask_output_dir,
     )
+    road_resolved = shapefile_resolver.resolve_shapefile(raster_path, "roads", road_shapefile)
     road_mask_path, road_source = _acquire_mask(
-        raster_path, "roads", road_shapefile, sam3_enabled,
+        raster_path, "roads", road_resolved, sam3_enabled,
         progress_callback=_phase_cb("Roads (SAM3)"),
         mask_output_dir=mask_output_dir,
     )
+    bldg_resolved = shapefile_resolver.resolve_shapefile(raster_path, "buildings", building_shapefile)
     bldg_mask_path, bldg_source = _acquire_mask(
-        raster_path, "buildings", building_shapefile, sam3_enabled,
+        raster_path, "buildings", bldg_resolved, sam3_enabled,
         progress_callback=_phase_cb("Buildings (SAM3)"),
         mask_output_dir=mask_output_dir,
     )

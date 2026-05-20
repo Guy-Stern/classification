@@ -212,8 +212,19 @@ def _load_sam3(device: str = "auto"):
             # Prefer SAM 3.1 (sam3.1_multiplex.pt) over SAM 3.0 (sam3.pt) —
             # 3.1 is substantially better on aerial imagery. Mirrors MATZA's
             # loader pattern (Matza/app/pipeline/sam3_runner.py).
+            #
+            # Accept two layouts:
+            #   nested:  <sam3_dir>/sam3/sam3.1_multiplex.pt   (project bundle)
+            #   flat:    <sam3_dir>/sam3.1_multiplex.pt        (MATZA-style)
+            # 3.1 is checked before 3.0 in both layouts so a single 3.1
+            # weight at the top level wins over a nested 3.0.
             ckpt_path = next(
-                (p for p in (sam3_dir / "sam3.1_multiplex.pt", sam3_dir / "sam3.pt") if p.exists()),
+                (p for p in (
+                    sam3_dir / "sam3" / "sam3.1_multiplex.pt",
+                    sam3_dir / "sam3.1_multiplex.pt",
+                    sam3_dir / "sam3" / "sam3.pt",
+                    sam3_dir / "sam3.pt",
+                ) if p.exists()),
                 None,
             )
             if ckpt_path is None:
@@ -230,7 +241,8 @@ def _load_sam3(device: str = "auto"):
                         raise FileNotFoundError("No local SAM3 checkpoint found")
                 except Exception:
                     raise FileNotFoundError(
-                        f"SAM3 checkpoint not found. Place sam3.1_multiplex.pt or sam3.pt in {sam3_dir}"
+                        f"SAM3 checkpoint not found. Place sam3.1_multiplex.pt or sam3.pt "
+                        f"in {sam3_weights_dir}"
                     )
 
             print(f"[RoadExtract] Loading local SAM3 from {ckpt_path} …")

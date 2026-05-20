@@ -38,6 +38,22 @@ SYNC_PAIRS: List[Tuple[str, List[str]]] = [
     ("backend/app/pipeline.py", [
         "offline_installer/app/backend/app/pipeline.py",
     ]),
+    ("backend/app/shapefile_config.py", [
+        "offline_installer/app/backend/app/shapefile_config.py",
+    ]),
+    ("backend/app/shapefile_resolver.py", [
+        "offline_installer/app/backend/app/shapefile_resolver.py",
+    ]),
+    # CLI (repo root) — mirrored next to the launcher
+    ("cli.py", [
+        "offline_installer/app/cli.py",
+    ]),
+    ("cli_launcher.py", [
+        "offline_installer/app/cli_launcher.py",
+    ]),
+    ("MaterialClassification_CLI.spec", [
+        "offline_installer/app/MaterialClassification_CLI.spec",
+    ]),
     # Shared MEA defaults
     ("shared/mea_defaults.json", [
         "offline_installer/app/shared/mea_defaults.json",

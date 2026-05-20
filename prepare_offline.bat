@@ -280,6 +280,18 @@ if not exist "%HF_SRC%" (
     echo    Model weights copied.
 )
 
+:: ── Copy local SAM3 checkpoint (models\sam3\sam3.pt + model.safetensors) ──
+:: SAM3 ships its checkpoint outside the HF cache (loader prefers a
+:: project-local models\sam3\ first). Bundle it so air-gapped installs work.
+if exist "models\sam3" (
+    echo Copying local SAM3 checkpoint (~6.9 GB)...
+    mkdir "offline_installer\app\models\sam3" >nul 2>&1
+    xcopy /e /i /y /q "models\sam3" "offline_installer\app\models\sam3\"
+    echo    SAM3 checkpoint copied.
+) else (
+    echo    NOTE: models\sam3\ not found locally — SAM3 will fall back to HF cache.
+)
+
 :: ── Copy app files ─────────────────────────────────────────────────
 echo.
 echo Copying application source files...
@@ -288,14 +300,53 @@ xcopy /e /i /y /q "web_app\dist"  "offline_installer\app\web_app\dist\" >nul
 xcopy /e /i /y /q "web_app\src"   "offline_installer\app\web_app\src\"  >nul
 xcopy /e /i /y /q "shared"        "offline_installer\app\shared\"       >nul
 
-for %%F in (launcher.py start.bat) do (
+:: Launchers, CLI, and PyInstaller specs
+for %%F in (launcher.py start.bat cli.py cli_launcher.py
+            ClassificationWebApp.spec MaterialClassification_CLI.spec) do (
     if exist "%%F" copy /y "%%F" "offline_installer\app\%%F" >nul
 )
+
+:: Built exes (only if build_exe.bat has run)
+for %%F in (ClassificationWebApp.exe MaterialClassification_CLI.exe) do (
+    if exist "%%F" copy /y "%%F" "offline_installer\app\%%F" >nul
+)
+
 copy /y "backend\requirements.txt"     "offline_installer\app\requirements.txt"     >nul
 copy /y "backend\requirements-gpu.txt" "offline_installer\app\requirements-gpu.txt" >nul
 copy /y "STANDALONE_DEPLOYMENT.md"     "offline_installer\STANDALONE_DEPLOYMENT.md" >nul 2>&1
 
 echo 1.0.0 > "offline_installer\app\version.txt"
+
+:: ── Drop the installer-wrapper exe alongside offline_installer/ so the ──
+:: pair (ClassificationInstaller.exe + offline_installer/ + Post-Install.bat)
+:: can be shipped as-is. The wrapper is a tiny .NET launcher that opens a
+:: folder picker and runs offline_installer\Setup.bat for the user.
+::
+:: NOTE: the .NET wrapper was compiled before this branch added cli.py /
+:: cli_launcher.py / the runtime exes — it doesn't know to copy them. The
+:: companion Post-Install.bat patches those four files into the install
+:: dir after the wrapper finishes.
+if exist "installer_assets\ClassificationInstaller.exe" (
+    copy /y "installer_assets\ClassificationInstaller.exe" "ClassificationInstaller.exe" >nul
+    echo    Wrapper exe ClassificationInstaller.exe placed at project root.
+) else (
+    echo    NOTE: installer_assets\ClassificationInstaller.exe missing —
+    echo          users will have to run offline_installer\Setup.bat directly.
+)
+
+if exist "installer_assets\Post-Install.bat" (
+    copy /y "installer_assets\Post-Install.bat" "Post-Install.bat" >nul
+    echo    Post-Install.bat patcher placed at project root.
+)
+if exist "installer_assets\README.txt" (
+    copy /y "installer_assets\README.txt" "README.txt" >nul
+    echo    README.txt placed at project root.
+)
+if exist "installer_assets\sam3_runtime" (
+    if not exist "sam3_runtime" mkdir "sam3_runtime" >nul 2>&1
+    xcopy /e /i /y /q "installer_assets\sam3_runtime" "sam3_runtime\" >nul
+    echo    sam3_runtime\ assets placed at project root.
+)
 
 (
 echo Classification Web App — Offline Installer Package
