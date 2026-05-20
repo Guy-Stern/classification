@@ -689,38 +689,6 @@ def _bounds_wgs84(
         return left, bottom, right, top
 
 
-def _next_pow2(n: int) -> int:
-    """Return the smallest power of 2 that is >= n."""
-    if n <= 0:
-        return 1
-    p = 1
-    while p < n:
-        p <<= 1
-    return p
-
-
-def _pad_array_to_pow2(arr: np.ndarray) -> Tuple[np.ndarray, int, int]:
-    """Zero-pad *arr* so its last two dimensions (H, W) are powers of 2.
-
-    Returns ``(padded_array, new_height, new_width)``.  Padding is added on
-    the right and bottom edges only, leaving the top-left origin unchanged so
-    the raster transform stays valid.  If both dimensions are already powers of
-    2 the original array is returned unchanged (no copy).
-    """
-    h, w = (arr.shape[-2], arr.shape[-1]) if arr.ndim >= 2 else (arr.shape[0], 1)
-    new_h = _next_pow2(h)
-    new_w = _next_pow2(w)
-    if new_h == h and new_w == w:
-        return arr, h, w          # nothing to do
-    if arr.ndim == 2:
-        padded = np.zeros((new_h, new_w), dtype=arr.dtype)
-        padded[:h, :w] = arr
-    else:
-        padded = np.zeros((*arr.shape[:-2], new_h, new_w), dtype=arr.dtype)
-        padded[..., :h, :w] = arr
-    return padded, new_h, new_w
-
-
 def _reproject_to_wgs84(
     arr: np.ndarray,
     src_transform,
@@ -820,9 +788,6 @@ def _write_txs_file(
         for img_path, left, bottom, right, top, img_w, img_h in image_infos:
             p = str(img_path)
             p_bak = f"{p} (backup)"
-            # Texel counts must be power-of-2 (GeoSpecific engine requirement).
-            texels_x = _next_pow2(img_w)
-            texels_y = _next_pow2(img_h)
             lines += [
                 f'Delete "{lib};{p_bak}"',
                 f'Rename "{lib};{p}" "{p_bak}"',
@@ -835,8 +800,8 @@ def _write_txs_file(
                 f'Set $thisRecord "Timestamp" ""',
                 f'Set $thisRecord "Origin Y" ""',
                 f'Set $thisRecord "Origin X" ""',
-                f'Set $thisRecord "Number of Texels Y" {texels_y}',
-                f'Set $thisRecord "Number of Texels X" {texels_x}',
+                f'Set $thisRecord "Number of Texels Y" {img_h}',
+                f'Set $thisRecord "Number of Texels X" {img_w}',
                 f'Set $thisRecord "Notes" ""',
                 f'Set $thisRecord "Misc3" ""',
                 f'Set $thisRecord "Misc2" ""',
@@ -1652,9 +1617,6 @@ def _classify_tile_worker(args: tuple) -> str:
     # Propagate updated georeferencing into the profile so write_profile inherits it.
     profile.update(transform=tile_transform, crs=tile_crs, height=height, width=width)
 
-    # Pad to power-of-2 dimensions — GeoSpecific engine requirement.
-    rgb, pad_h, pad_w = _pad_array_to_pow2(rgb)
-
     output_path_obj = Path(output_dir) / tile_name
     driver = _driver_for_path(str(output_path_obj))
     if driver == "GTiff":
@@ -1663,22 +1625,21 @@ def _classify_tile_worker(args: tuple) -> str:
     else:
         write_profile = _profile_for_driver(profile, driver)
         write_profile.update(count=3, dtype="uint8")
-    write_profile.update(height=pad_h, width=pad_w)
+    write_profile.update(height=height, width=width)
     with rasterio.open(output_path_obj, 'w', **write_profile) as dst:
         dst.write(rgb)
     del rgb, tile_data_crop, predicted_raster
     gc.collect()
 
-    # Write .txr sidecar using the padded dimensions for correct geographic bounds.
-    _write_txr_file(output_path_obj, tile_transform, tile_crs, pad_w, pad_h)
-    _t_left, _t_bottom, _t_right, _t_top = _bounds_wgs84(tile_transform, tile_crs, pad_w, pad_h)
+    _write_txr_file(output_path_obj, tile_transform, tile_crs, width, height)
+    _t_left, _t_bottom, _t_right, _t_top = _bounds_wgs84(tile_transform, tile_crs, width, height)
 
     # Write companion XML for every classified tile.
     _tile_classes = extra.get("classes", [])
     if _tile_classes:
         _write_composite_material_xml(output_path_obj, list(_tile_classes))
 
-    return (str(output_path_obj), _t_left, _t_bottom, _t_right, _t_top, pad_w, pad_h)
+    return (str(output_path_obj), _t_left, _t_bottom, _t_right, _t_top, width, height)
 
 
 def _rasterize_tile_worker(args: Tuple[str, Optional[Tuple[int, int, int, int]], List[Tuple[List, int, Tuple[int, int, int]]], str, str]) -> str:
@@ -1734,24 +1695,20 @@ def _rasterize_tile_worker(args: Tuple[str, Optional[Tuple[int, int, int, int]],
     )
     meta.update(transform=transform, crs=raster_crs, height=height, width=width)
 
-    # Pad to power-of-2 dimensions — GeoSpecific engine requirement.
-    output_array, pad_h, pad_w = _pad_array_to_pow2(output_array)
-
     output_path = Path(output_dir) / tile_name
     driver = _driver_for_path(str(output_path))
     if driver == "GTiff":
         write_meta = _output_tiff_profile(meta)
     else:
         write_meta = _profile_for_driver(meta, driver)
-    write_meta.update(height=pad_h, width=pad_w)
+    write_meta.update(height=height, width=width)
     with rasterio.open(output_path, 'w', **write_meta) as dst:
         dst.write(output_array)
 
-    # Write .txr sidecar using the padded dimensions for correct geographic bounds.
-    _write_txr_file(output_path, transform, raster_crs, pad_w, pad_h)
-    _t_left, _t_bottom, _t_right, _t_top = _bounds_wgs84(transform, raster_crs, pad_w, pad_h)
+    _write_txr_file(output_path, transform, raster_crs, width, height)
+    _t_left, _t_bottom, _t_right, _t_top = _bounds_wgs84(transform, raster_crs, width, height)
 
-    return (str(output_path), _t_left, _t_bottom, _t_right, _t_top, pad_w, pad_h)
+    return (str(output_path), _t_left, _t_bottom, _t_right, _t_top, width, height)
 
 
 def rasterize_vector_onto_raster(raster_path: str, gdf, burn_value: int, output_path: str, crs,
@@ -1983,10 +1940,6 @@ def rasterize_vector_onto_raster(raster_path: str, gdf, burn_value: int, output_
     )
     meta.update(transform=transform, crs=raster_crs, height=height, width=width)
 
-    # Pad to power-of-2 dimensions — GeoSpecific engine requirement.
-    output_array, _pad_h, _pad_w = _pad_array_to_pow2(output_array)
-    meta.update(height=_pad_h, width=_pad_w)
-
     # Save result
     print(f"    Saving to: {output_path}")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1998,7 +1951,7 @@ def rasterize_vector_onto_raster(raster_path: str, gdf, burn_value: int, output_
     with rasterio.open(output_path, 'w', **_meta) as dst:
         dst.write(output_array)
 
-    print(f"    [OK] Vector rasterized successfully (padded to {_pad_w}×{_pad_h})")
+    print(f"    [OK] Vector rasterized successfully ({width}x{height})")
 
 
 # ---------------------------------------------------------------------------
@@ -2702,8 +2655,7 @@ def classify_and_export(
             predictor=2,
         )
     
-    # Pad to power-of-2 dimensions — GeoSpecific engine requirement.
-    rgb, out_h, out_w = _pad_array_to_pow2(rgb)
+    out_h, out_w = rgb.shape[1], rgb.shape[2]
     rgb_profile.update(height=out_h, width=out_w)
 
     output_color_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2713,7 +2665,6 @@ def classify_and_export(
     with rasterio.open(output_color_path, 'w', **rgb_profile) as dst:
         dst.write(rgb)
 
-    # Write .txr sidecar and all_imgs.txs using padded dimensions.
     _out_transform = profile.get("transform")
     _out_crs = profile.get("crs")
     _write_txr_file(output_color_path, _out_transform, _out_crs, out_w, out_h)
