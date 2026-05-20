@@ -693,10 +693,24 @@ def main():
                     "texture": not args.no_texture,
                     "indices": args.indices,
                 }
+                # MEA mode: train on the 3 kmeans-source materials only
+                # (BM_VEGETATION/BM_SAND/BM_SOIL). BM_ASPHALT/BM_CONCRETE/
+                # BM_WATER are mask-source — classify_v6 paints them per
+                # raster from SAM3 / shapefiles. Mirrors /classify-batch.
+                if args.mea:
+                    from backend.app.pipeline import _split_classes_by_source
+                    train_classes, _ = _split_classes_by_source(classes)
+                    print(f"[Batch] MEA mode: shared model trained on "
+                          f"{len(train_classes)}/{len(classes)} kmeans-source "
+                          f"classes ({[c['name'] for c in train_classes]}); "
+                          f"BM_ASPHALT/BM_CONCRETE/BM_WATER painted per-raster.")
+                else:
+                    train_classes = classes
+
                 print(f"[Batch] Training shared model on {len(files)} raster(s)...")
                 shared_scaler, shared_kmeans = train_kmeans_model(
                     [str(p) for p in files],
-                    classes,
+                    train_classes,
                     feature_flags,
                     detect_shadows=args.detect_shadows,
                 )
@@ -705,7 +719,7 @@ def main():
                     [str(p) for p in files],
                     shared_scaler,
                     shared_kmeans,
-                    classes,
+                    train_classes,
                     feature_flags,
                 )
                 print("[Batch] Shared model ready; applying to all files.")
