@@ -252,14 +252,47 @@ echo    Skipping PyTorch.
 echo.
 echo [7/7] GPU KMeans acceleration packages?
 echo    (Optional — cupy + nvidia-cuda-*  for GPU KMeans on NVIDIA machines)
+echo    Download is ~800 MB (nvidia-cublas-cu12 alone is ~550 MB).
 echo.
 set /p GPU_CHOICE="   Download GPU packages? [y/N]: "
 if /i "%GPU_CHOICE%"=="y" (
-    echo    Downloading GPU packages...
+    echo    Downloading GPU packages (with retries on flaky links)...
     %PYTHON% -m pip download ^
         -r "backend\requirements-gpu.txt" ^
         -d "offline_installer\offline_packages_gpu" ^
-        --prefer-binary
+        --prefer-binary ^
+        --retries 10 ^
+        --timeout 300
+    if errorlevel 1 (
+        echo    WARNING: pip download exited with error code — some wheels likely missing.
+    )
+
+    :: Verify each required wheel actually landed in the folder. The most
+    :: common failure mode is nvidia-cublas-cu12 (~550 MB) silently being
+    :: skipped on flaky connections, which leaves cupy unusable at runtime.
+    echo    Verifying GPU packages...
+    set GPU_OK=1
+    if not exist "offline_installer\offline_packages_gpu\cupy_cuda12x-*.whl"          set GPU_OK=0
+    if not exist "offline_installer\offline_packages_gpu\nvidia_cuda_runtime_cu12-*.whl" set GPU_OK=0
+    if not exist "offline_installer\offline_packages_gpu\nvidia_cublas_cu12-*.whl"   set GPU_OK=0
+    if not exist "offline_installer\offline_packages_gpu\nvidia_cuda_nvrtc_cu12-*.whl"  set GPU_OK=0
+    if not exist "offline_installer\offline_packages_gpu\nvidia_curand_cu12-*.whl"     set GPU_OK=0
+    if "%GPU_OK%"=="0" (
+        echo.
+        echo    ============================================================
+        echo    WARNING: GPU packages incomplete. Wheels present:
+        dir /b "offline_installer\offline_packages_gpu\*.whl" 2>nul
+        echo.
+        echo    Required: cupy_cuda12x, nvidia_cuda_runtime_cu12,
+        echo              nvidia_cublas_cu12, nvidia_cuda_nvrtc_cu12,
+        echo              nvidia_curand_cu12.
+        echo.
+        echo    GPU KMeans will fall back to CPU on the target machine.
+        echo    Re-run with a stable internet connection to fix this.
+        echo    ============================================================
+    ) else (
+        echo    All required GPU wheels present.
+    )
     echo    GPU packages done.
 ) else (
     echo    Skipping GPU packages.
