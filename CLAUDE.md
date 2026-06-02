@@ -1,11 +1,15 @@
 ## graphify
 
-This project has a graphify knowledge graph at graphify-out/.
+This project is wired to use a graphify knowledge graph at `graphify-out/`, but
+that directory is **not present in this checkout** (lost in the May-2026
+deletion incident) and the `graphify` tool is not currently installed. For now
+there is **no graph to read or update — read the source directly.**
 
-Rules:
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
-- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
+To restore it: install graphify, then run a full `/graphify .` build (that build
+has LLM/token cost). Once `graphify-out/` exists again, the original workflow
+applies — read `graphify-out/GRAPH_REPORT.md` before architecture questions,
+prefer `graphify-out/wiki/index.md` if present, and run `/graphify . --update`
+after code changes (incremental, AST-only, no API cost).
 
 ## Project: MaterialClassification
 
