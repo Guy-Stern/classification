@@ -48,7 +48,7 @@ if not exist "%SRC%\app\cli.py" (
 :: ── [1/3] Copy CLI files the wrapper doesn't know about ───────────────
 echo.
 echo [1/3] Copying CLI files into %INSTALL_DIR% ...
-for %%F in (cli.py cli_launcher.py ClassificationWebApp.exe MaterialClassification_CLI.exe) do (
+for %%F in (cli.py cli_launcher.py sde_conn_test.py ClassificationWebApp.exe MaterialClassification_CLI.exe) do (
     if exist "%SRC%\app\%%F" (
         copy /y "%SRC%\app\%%F" "%INSTALL_DIR%\%%F" >nul
         echo   copied  %%F
@@ -109,9 +109,21 @@ if not exist "%INSTALL_DIR%\shapefile_config.json" (
     > "%INSTALL_DIR%\shapefile_config.json" echo {
     >>"%INSTALL_DIR%\shapefile_config.json" echo   "buildings": [],
     >>"%INSTALL_DIR%\shapefile_config.json" echo   "roads": [],
-    >>"%INSTALL_DIR%\shapefile_config.json" echo   "water": []
+    >>"%INSTALL_DIR%\shapefile_config.json" echo   "water": [],
+    >>"%INSTALL_DIR%\shapefile_config.json" echo   "sde": {
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "enabled": true,
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "connection_file": "SET_ME_path_to_your_connection.sde",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "arcpy_python": "C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "tile_size_metres": 5000,
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "timeout_seconds": 1800,
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "layers": {
+    >>"%INSTALL_DIR%\shapefile_config.json" echo       "buildings": "SET_ME_GDB.SCHEMA.BUILDINGS",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo       "roads": "SET_ME_GDB.SCHEMA.ROADS",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo       "water": "SET_ME_GDB.SCHEMA.WATER"
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     }
+    >>"%INSTALL_DIR%\shapefile_config.json" echo   }
     >>"%INSTALL_DIR%\shapefile_config.json" echo }
-    echo   created  shapefile_config.json
+    echo   created  shapefile_config.json  ^(with sde block — edit connection_file + layers - see README^)
 ) else (
     echo   already exists, leaving alone.
 )
@@ -124,8 +136,12 @@ echo.
 echo Try the CLI:
 echo   "%INSTALL_DIR%\MaterialClassification_CLI.exe" --examples
 echo.
-echo Edit shapefile paths:
+echo Configure SDE / shapefile paths - edit the "sde" block:
 echo   notepad "%INSTALL_DIR%\shapefile_config.json"
+echo   ^(set connection_file + layers; see README.txt SDE section^)
+echo.
+echo Test the SDE connection ^(writes a .log you can send back^):
+echo   "%INSTALL_DIR%\.venv\Scripts\python.exe" "%INSTALL_DIR%\sde_conn_test.py"
 echo.
 pause
 endlocal

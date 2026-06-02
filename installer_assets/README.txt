@@ -78,6 +78,49 @@ After install
   Help:   MaterialClassification_CLI.exe --examples
 
 
+Enterprise geodatabase (SDE / ArcGIS) setup
+-------------------------------------------
+This build ships with SDE extraction ENABLED in shapefile_config.json
+(written to the install root by Post-Install.bat). On every
+classification it pulls building / road / water features for the
+raster's footprint straight from an Esri enterprise geodatabase, using
+a worker that runs under ArcGIS Pro's Python (arcpy), then unions them
+with any file-based shapefiles.
+
+To finish wiring it, edit the "sde" block in
+  <install dir>\shapefile_config.json
+and replace the SET_ME_ placeholders:
+
+  connection_file   Full path to your .sde connection file on THIS
+                    machine. Create one in ArcGIS Pro:
+                    Catalog > Database Connections > Add Database
+                    Connection, then point this at the resulting .sde.
+
+  layers            The feature-class names in the geodatabase for
+                    buildings / roads / water, e.g. "MYDB.SDE.BUILDINGS".
+
+  arcpy_python      Path to ArcGIS Pro's python.exe (the one with
+                    arcpy). Default assumes a standard install:
+                    C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe
+                    Change only if ArcGIS Pro lives elsewhere.
+
+Requirements: ArcGIS Pro (with arcpy) installed on this machine, and
+the account must be able to reach the geodatabase.
+
+Graceful fallback: if any SET_ME_ placeholder is left in place, the
+.sde can't be opened, or ArcGIS Pro isn't found, SDE extraction is
+skipped and the app falls back to SAM3 for roads/buildings (water is
+SDE/shapefile-only). To disable SDE entirely, set "enabled": false.
+
+Verify the connection (recommended, before a full run):
+  <install dir>\.venv\Scripts\python.exe sde_conn_test.py
+It opens the .sde, lists each layer's feature count / CRS / extent, and
+writes sde_conn_test_<timestamp>.log next to the script. Add
+  --raster <ortho.tif>
+to also test a real extraction (tiling -> selection -> shapefiles).
+Send that .log file if anything fails.
+
+
 Why pip --no-index is air-gap safe
 -----------------------------------
 Post-Install.bat invokes pip like this:

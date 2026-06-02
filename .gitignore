@@ -38,3 +38,9 @@ offline_installer/prerequisites/
 *.safetensors
 *.pt
 *.blend
+
+# Build outputs + local-only files (never commit)
+publishes/
+*.gpkg
+shapefile_config.json
+.recovery/

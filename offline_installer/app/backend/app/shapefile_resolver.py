@@ -23,6 +23,11 @@ they know what they're doing.
 
 If no shapefiles are configured (or none intersect the ortho), returns
 ``None`` so the caller can fall back to SAM3 / no-mask.
+
+If ``shapefile_config.json`` has an enabled ``sde`` block, this resolver
+also pulls features per-raster from an Esri enterprise geodatabase via
+``sde_extractor`` (see that module). SDE-tile shapefiles are unioned
+with any file-based shapefiles configured for the same feature type.
 """
 from __future__ import annotations
 
@@ -33,7 +38,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from . import shapefile_config
+from . import sde_extractor, shapefile_config
 
 # Buffer applied to the ortho bounds when filtering features. Keeps any
 # feature that just barely touches the edge whole, instead of dropping it.
@@ -70,18 +75,18 @@ def resolve_shapefile(
       - none of the configured shapefiles intersect the ortho, OR
       - the ortho can't be opened (rasterio failure).
     """
+    print(f"[debug-resolver] >>> resolve_shapefile(raster={Path(raster_path).name!r}, "
+          f"feature_type={feature_type!r}, override={override!r})")
+
     if override:
         if Path(override).exists():
+            print(f"[debug-resolver] override exists — using it as-is, skipping SDE + config: {override}")
             return override
         # An explicit override that doesn't exist is a hard signal — the
         # user said "use this file". Falling back to config would silently
         # use a different shapefile, so return None and let _acquire_mask
         # decide (SAM3 fallback or no-mask).
         print(f"[shapefile_resolver] override missing — no fallback: {override}")
-        return None
-
-    paths = shapefile_config.get(feature_type)
-    if not paths:
         return None
 
     try:
@@ -92,6 +97,7 @@ def resolve_shapefile(
         import pyogrio
     except Exception as exc:
         print(f"[shapefile_resolver] missing geo deps ({exc})")
+        print(f"[debug-resolver] EXIT: missing geo deps -> returning None")
         return None
 
     try:
@@ -100,10 +106,14 @@ def resolve_shapefile(
             raster_bounds = src.bounds  # (left, bottom, right, top)
     except Exception as exc:
         print(f"[shapefile_resolver] cannot open raster {raster_path}: {exc}")
+        print(f"[debug-resolver] EXIT: rasterio.open failed -> returning None")
         return None
+
+    print(f"[debug-resolver] raster CRS={raster_crs}  bounds={raster_bounds}")
 
     if raster_crs is None:
         print(f"[shapefile_resolver] raster {raster_path} has no CRS — cannot trim")
+        print(f"[debug-resolver] EXIT: raster has no CRS -> returning None")
         return None
 
     buf = _bounds_buffer_in_raster_units(raster_crs)
@@ -113,6 +123,30 @@ def resolve_shapefile(
         raster_bounds.right  + buf,
         raster_bounds.top    + buf,
     )
+    print(f"[debug-resolver] buffer in raster units = {buf}  buffered_bounds={raster_bounds_buf}")
+
+    # SDE extraction (Path B stopgap): if shapefile_config.json has an
+    # enabled ``sde`` block, pull features for this feature_type from the
+    # configured layer via an arcpy subprocess. The worker tiles the
+    # bounds (default 5 km) so we don't trip the 2 GB / ~1M-row
+    # shapefile ceiling, and returns one .shp per tile. We treat those
+    # tiles as additional inputs to the union loop below — same code
+    # path that handles file-based shapefiles.
+    sde_wkid = raster_crs.to_epsg() if raster_crs else None
+    print(f"[debug-resolver] handing off to sde_extractor with wkid={sde_wkid}")
+    sde_shps = sde_extractor.extract_to_shapefiles(
+        feature_type, raster_bounds_buf, sde_wkid, Path(raster_path).stem,
+    )
+    print(f"[debug-resolver] sde_extractor returned {len(sde_shps)} shapefile(s)")
+
+    file_shps = list(shapefile_config.get(feature_type))
+    print(f"[debug-resolver] file-based shapefiles from config[{feature_type!r}] = {file_shps}")
+    paths = list(sde_shps) + file_shps
+    print(f"[debug-resolver] combined paths ({len(paths)}): {paths}")
+    if not paths:
+        print(f"[debug-resolver] EXIT: no SDE tiles AND no file shapefiles -> returning None "
+              f"(this is why _acquire_mask saw user_shapefile=None for {feature_type!r})")
+        return None
 
     matched_gdfs: List["gpd.GeoDataFrame"] = []
     for sp in paths:

@@ -44,12 +44,24 @@ SYNC_PAIRS: List[Tuple[str, List[str]]] = [
     ("backend/app/shapefile_resolver.py", [
         "offline_installer/app/backend/app/shapefile_resolver.py",
     ]),
+    ("backend/app/sde_extractor.py", [
+        "offline_installer/app/backend/app/sde_extractor.py",
+    ]),
+    ("backend/app/sde_arcpy_worker.py", [
+        "offline_installer/app/backend/app/sde_arcpy_worker.py",
+    ]),
+    ("backend/app/sde_probe_worker.py", [
+        "offline_installer/app/backend/app/sde_probe_worker.py",
+    ]),
     # CLI (repo root) — mirrored next to the launcher
     ("cli.py", [
         "offline_installer/app/cli.py",
     ]),
     ("cli_launcher.py", [
         "offline_installer/app/cli_launcher.py",
+    ]),
+    ("sde_conn_test.py", [
+        "offline_installer/app/sde_conn_test.py",
     ]),
     ("MaterialClassification_CLI.spec", [
         "offline_installer/app/MaterialClassification_CLI.spec",
