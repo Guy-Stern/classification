@@ -56,9 +56,7 @@ export interface Step1Params {
   taskId?: string;
   // 6-material SAM3-first pipeline controls (v6).
   sam3Enabled?: boolean;
-  roadShapefile?: string | null;
-  buildingShapefile?: string | null;
-  waterShapefile?: string | null;
+  waterMask?: string | null;
 }
 
 export async function runStep1(params: Step1Params): Promise<ClassifyResult> {
@@ -77,9 +75,7 @@ export async function runStep1(params: Step1Params): Promise<ClassifyResult> {
     maxThreads: params.maxThreads ?? null,
     taskId: params.taskId ?? null,
     sam3Enabled: params.sam3Enabled ?? true,
-    roadShapefile: params.roadShapefile ?? null,
-    buildingShapefile: params.buildingShapefile ?? null,
-    waterShapefile: params.waterShapefile ?? null,
+    waterMask: params.waterMask ?? null,
   };
   const r = await fetch(`${BASE}/classify-step1`, {
     method: "POST",
@@ -138,9 +134,7 @@ export interface FullPipelineParams {
   maxThreads?: number | null;
   taskId?: string;
   sam3Enabled?: boolean;
-  roadShapefile?: string | null;
-  buildingShapefile?: string | null;
-  waterShapefile?: string | null;
+  waterMask?: string | null;
 }
 
 export async function runFullPipeline(
@@ -162,9 +156,7 @@ export async function runFullPipeline(
     maxThreads: params.maxThreads ?? null,
     taskId: params.taskId ?? null,
     sam3Enabled: params.sam3Enabled ?? true,
-    roadShapefile: params.roadShapefile ?? null,
-    buildingShapefile: params.buildingShapefile ?? null,
-    waterShapefile: params.waterShapefile ?? null,
+    waterMask: params.waterMask ?? null,
   };
   const r = await fetch(`${BASE}/classify`, {
     method: "POST",
@@ -216,9 +208,7 @@ export interface BatchParams {
   maxThreads?: number | null;
   taskId?: string;
   sam3Enabled?: boolean;
-  roadShapefile?: string | null;
-  buildingShapefile?: string | null;
-  waterShapefile?: string | null;
+  waterMask?: string | null;
 }
 
 export interface BatchResult {
@@ -248,9 +238,7 @@ export async function runBatchClassify(params: BatchParams): Promise<BatchResult
     maxThreads: params.maxThreads ?? null,
     taskId: params.taskId ?? null,
     sam3Enabled: params.sam3Enabled ?? true,
-    roadShapefile: params.roadShapefile ?? null,
-    buildingShapefile: params.buildingShapefile ?? null,
-    waterShapefile: params.waterShapefile ?? null,
+    waterMask: params.waterMask ?? null,
   };
   const r = await fetch(`${BASE}/classify-batch`, {
     method: "POST",

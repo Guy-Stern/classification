@@ -1,33 +1,22 @@
-"""Smart-trim shapefile resolver for the 6-material MEA pipeline.
+"""Smart-trim resolver for the 6-material MEA pipeline (buildings & roads).
 
-For each feature type (buildings / roads / water) the user can configure
-multiple source shapefiles (one per state, region, etc.) in
-``shapefile_config.json``.  At classification time, this resolver:
+Buildings and roads are pulled per-raster from an Esri enterprise
+geodatabase (the ``sde`` block of ``shapefile_config.json``) via
+``sde_extractor``. At classification time this resolver:
 
   1. Reads the ortho raster's bounds + CRS.
-  2. For each configured shapefile, checks whether its envelope intersects
-     the ortho bounds (in the shapefile's own CRS, with a small buffer in
-     metres so features straddling the ortho edge are kept whole).
-  3. For shapefiles that intersect, reads only the features whose geometry
-     intersects the buffered bounds — geopandas/fiona use the ``.shx``
-     spatial index for this, so the read is fast even on multi-GB inputs.
-  4. Reprojects each batch of features to the raster's CRS.
-  5. Concatenates everything into a single GeoDataFrame and writes it to
-     a fresh temp ``.shp`` (with sidecar ``.shx`` / ``.dbf`` / ``.prj``).
-  6. Returns the temp path so the existing ``_rasterise_user_shapefile_to_mask``
-     code path can consume it unchanged.
+  2. Hands the buffered bounds to ``sde_extractor``, which returns one
+     trimmed ``.shp`` per tile (already restricted to the ortho footprint).
+  3. Reads each tile, reprojects features to the raster's CRS, and
+     concatenates them (per-feature attributes are preserved).
+  4. For roads, buffers the LINE geometries into road-width polygons (see
+     ``_buffer_road_lines``) using the configured width attribute.
+  5. Writes the result to a fresh temp ``.shp`` and returns its path so the
+     existing ``_rasterise_user_shapefile_to_mask`` consumes it unchanged.
 
-If the user passes an explicit override path (CLI flag), that path wins
-unconditionally — no trim, no union — because the user has signalled
-they know what they're doing.
-
-If no shapefiles are configured (or none intersect the ortho), returns
-``None`` so the caller can fall back to SAM3 / no-mask.
-
-If ``shapefile_config.json`` has an enabled ``sde`` block, this resolver
-also pulls features per-raster from an Esri enterprise geodatabase via
-``sde_extractor`` (see that module). SDE-tile shapefiles are unioned
-with any file-based shapefiles configured for the same feature type.
+Returns ``None`` when nothing resolves, so the caller can fall back to
+SAM3 / no-mask. (Water is handled separately as a raster mask — see
+``shapefile_config.get_water_mask``.)
 """
 from __future__ import annotations
 
@@ -61,33 +50,21 @@ atexit.register(_cleanup_temp_dirs)
 def resolve_shapefile(
     raster_path: str,
     feature_type: str,
-    override: Optional[str] = None,
 ) -> Optional[str]:
     """Return a single ``.shp`` path ready for the existing rasterizer.
 
-    ``override`` (if provided and existing) wins outright. Otherwise the
-    resolver unions all configured shapefiles for ``feature_type`` whose
-    envelopes intersect ``raster_path``'s buffered bounds, writes the
-    union to a temp ``.shp``, and returns that path.
+    Unions the SDE-extracted features for ``feature_type`` whose envelopes
+    intersect ``raster_path``'s buffered bounds, writes the union to a temp
+    ``.shp`` (buffering road lines to polygons for ``feature_type == "roads"``),
+    and returns that path.
 
     Returns ``None`` when:
-      - no override and no configured shapefiles, OR
-      - none of the configured shapefiles intersect the ortho, OR
+      - no SDE features resolve, OR
+      - none of them intersect the ortho, OR
       - the ortho can't be opened (rasterio failure).
     """
     print(f"[debug-resolver] >>> resolve_shapefile(raster={Path(raster_path).name!r}, "
-          f"feature_type={feature_type!r}, override={override!r})")
-
-    if override:
-        if Path(override).exists():
-            print(f"[debug-resolver] override exists — using it as-is, skipping SDE + config: {override}")
-            return override
-        # An explicit override that doesn't exist is a hard signal — the
-        # user said "use this file". Falling back to config would silently
-        # use a different shapefile, so return None and let _acquire_mask
-        # decide (SAM3 fallback or no-mask).
-        print(f"[shapefile_resolver] override missing — no fallback: {override}")
-        return None
+          f"feature_type={feature_type!r})")
 
     try:
         import rasterio
@@ -139,9 +116,7 @@ def resolve_shapefile(
     )
     print(f"[debug-resolver] sde_extractor returned {len(sde_shps)} shapefile(s)")
 
-    file_shps = list(shapefile_config.get(feature_type))
-    print(f"[debug-resolver] file-based shapefiles from config[{feature_type!r}] = {file_shps}")
-    paths = list(sde_shps) + file_shps
+    paths = list(sde_shps)
     print(f"[debug-resolver] combined paths ({len(paths)}): {paths}")
     if not paths:
         print(f"[debug-resolver] EXIT: no SDE tiles AND no file shapefiles -> returning None "
@@ -206,6 +181,19 @@ def resolve_shapefile(
             crs=raster_crs,
         )
 
+    # Roads arrive from SDE as LINE geometries — buffer each to a polygon the
+    # width of the road before rasterising (a bare line burns a 1-px
+    # centreline). Width per feature comes from the configured attribute, else
+    # the fallback; both are metres, converted to raster units.
+    if feature_type == "roads":
+        sde_cfg = shapefile_config.get_sde()
+        width_attr = str(sde_cfg.get("road_width_attr") or "")
+        fallback_m = float(sde_cfg.get("road_width_fallback_m") or 2.0)
+        merged = _buffer_road_lines(merged, raster_crs, width_attr, fallback_m)
+        if merged.empty:
+            print(f"[shapefile_resolver] roads: nothing left after buffering -> None")
+            return None
+
     return _write_temp_shapefile(merged, feature_type, Path(raster_path).stem)
 
 
@@ -213,23 +201,61 @@ def resolve_shapefile(
 # Internals
 # ---------------------------------------------------------------------------
 
-def _bounds_buffer_in_raster_units(raster_crs) -> float:
-    """Return the per-axis bounds buffer expressed in the raster CRS's
-    horizontal units.
+def _metres_to_crs_units(metres: float, raster_crs) -> float:
+    """Convert a distance in metres to the raster CRS's horizontal units.
 
-    Projected CRS in metres or feet → convert _BOUNDS_BUFFER_METRES.
-    Geographic CRS (degrees) → convert by approximating 1 degree latitude
-    as 111_320 m at the equator. This is fine for a 50 m buffer; the
-    actual filter still uses real geometry intersection downstream.
+    Geographic CRS (degrees) → approximate 1 degree as 111_320 m at the
+    equator. Projected CRS → divide by the CRS's linear-unit factor
+    (metre = 1, US-survey-foot ≈ 0.3048). Falls back to the raw metres
+    value on any error.
     """
     try:
         if raster_crs.is_geographic:
-            return _BOUNDS_BUFFER_METRES / 111_320.0
-        # projected — find unit (default to metre)
+            return metres / 111_320.0
         unit_factor = raster_crs.linear_units_factor[1] if hasattr(raster_crs, "linear_units_factor") else 1.0
-        return _BOUNDS_BUFFER_METRES / unit_factor if unit_factor else _BOUNDS_BUFFER_METRES
+        return metres / unit_factor if unit_factor else metres
     except Exception:
-        return _BOUNDS_BUFFER_METRES
+        return metres
+
+
+def _bounds_buffer_in_raster_units(raster_crs) -> float:
+    """Return the per-axis bounds buffer (50 m) in the raster CRS's units."""
+    return _metres_to_crs_units(_BOUNDS_BUFFER_METRES, raster_crs)
+
+
+def _buffer_road_lines(gdf, raster_crs, width_attr: str, fallback_m: float):
+    """Buffer road LINE geometries into road-width polygons.
+
+    Each feature is buffered by HALF of its width: the ``width_attr`` value
+    (full road width in metres) when present and > 0, else ``fallback_m``.
+    Half-widths are converted from metres to the raster CRS's units so a 2 m
+    road stays 2 m wide instead of 2 degrees on a geographic CRS. Flat
+    end-caps (cap_style="flat") avoid overshoot past endpoints; round joins
+    keep bends connected.
+    """
+    fallback_half = _metres_to_crs_units(fallback_m / 2.0, raster_crs)
+
+    def _half_units(value) -> float:
+        try:
+            w = float(value)
+        except (TypeError, ValueError):
+            return fallback_half
+        return _metres_to_crs_units(w / 2.0, raster_crs) if w > 0 else fallback_half
+
+    if width_attr and width_attr in gdf.columns:
+        distances = [_half_units(v) for v in gdf[width_attr]]
+    else:
+        if width_attr:
+            print(f"[shapefile_resolver] roads: width attr {width_attr!r} not found in "
+                  f"columns {list(gdf.columns)} — using {fallback_m} m fallback for all")
+        distances = [fallback_half] * len(gdf)
+
+    out = gdf.copy()
+    out["geometry"] = gdf.geometry.buffer(distances, cap_style="flat")
+    out = out[~(out.geometry.is_empty | out.geometry.isna())]
+    print(f"[shapefile_resolver] roads: buffered {len(out)} feature(s) to polygons "
+          f"(attr={width_attr or '—'}, fallback={fallback_m} m)")
+    return out
 
 
 def _bbox_intersects(a, b) -> bool:

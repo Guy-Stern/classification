@@ -82,10 +82,11 @@ Enterprise geodatabase (SDE / ArcGIS) setup
 -------------------------------------------
 This build ships with SDE extraction ENABLED in shapefile_config.json
 (written to the install root by Post-Install.bat). On every
-classification it pulls building / road / water features for the
-raster's footprint straight from an Esri enterprise geodatabase, using
-a worker that runs under ArcGIS Pro's Python (arcpy), then unions them
-with any file-based shapefiles.
+classification it pulls building / road features for the raster's
+footprint straight from an Esri enterprise geodatabase, using a worker
+that runs under ArcGIS Pro's Python (arcpy). Road lines are buffered to
+polygons using their width attribute. Water is painted separately from a
+raster mask (see "water_mask" below).
 
 To finish wiring it, edit the "sde" block in
   <install dir>\shapefile_config.json
@@ -97,7 +98,23 @@ and replace the SET_ME_ placeholders:
                     Connection, then point this at the resulting .sde.
 
   layers            The feature-class names in the geodatabase for
-                    buildings / roads / water, e.g. "MYDB.SDE.BUILDINGS".
+                    buildings / roads, e.g. "MYDB.SDE.BUILDINGS".
+
+  road_width_attr   Field on the road features holding the FULL road
+                    width in metres (used to buffer road lines into
+                    polygons). ESRI shapefiles truncate field names to
+                    10 chars, so use the truncated name. Leave "" to
+                    always use the fallback.
+  road_width_fallback_m
+                    Road width in metres when road_width_attr is missing
+                    or <= 0 (default 2.0).
+
+  water_mask        Full path to a single-band GeoTIFF where band 1 > 0
+                    marks water. Covers the whole AOI; it's reprojected /
+                    clipped to each ortho automatically and painted as
+                    BM_WATER. Leave "" for no water. (If you previously
+                    set water_mask_path in app_config.json, move that
+                    path here.)
 
   arcpy_python      Path to ArcGIS Pro's python.exe (the one with
                     arcpy). Default assumes a standard install:
@@ -109,8 +126,9 @@ the account must be able to reach the geodatabase.
 
 Graceful fallback: if any SET_ME_ placeholder is left in place, the
 .sde can't be opened, or ArcGIS Pro isn't found, SDE extraction is
-skipped and the app falls back to SAM3 for roads/buildings (water is
-SDE/shapefile-only). To disable SDE entirely, set "enabled": false.
+skipped and the app falls back to SAM3 for roads/buildings (water only
+paints when water_mask is set). To disable SDE entirely, set
+"enabled": false.
 
 Verify the connection (recommended, before a full run):
   <install dir>\.venv\Scripts\python.exe sde_conn_test.py

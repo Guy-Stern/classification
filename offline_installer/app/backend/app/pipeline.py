@@ -2,9 +2,10 @@
 
 This module orchestrates the v6 flow:
 
-  1. Acquire water, road and building masks — water is shapefile-only (never
-     SAM3 or KMeans), road and building come from user-uploaded shapefile if
-     provided, else from SAM3 (when ``sam3_enabled``), else empty.
+  1. Acquire water, road and building masks — water is a pre-rasterised
+     GeoTIFF (band 1 > 0 = water) painted directly; road and building come
+     from the configured SDE layers (roads buffered to polygons), else from
+     SAM3 (when ``sam3_enabled``), else empty.
   2. Run KMeans classification on the 3 ``source="kmeans"`` materials only
      (BM_VEGETATION, BM_SAND, BM_SOIL), reusing ``core.classify_and_export``
      with the filtered class list.  Strict 1:1 cluster→material assignment
@@ -43,6 +44,7 @@ _MASK_FEATURE_FOR_CLASS: Dict[str, str] = {
 # like vegetation/water.
 _VETO_THRESHOLDS: Dict[str, float] = {
     "shapefile":   1.01,
+    "raster":      1.01,   # water_mask GeoTIFF — authoritative, never vetoed
     "sam3":        1.01,
     "sam3_failed": 1.01,
     "sam3_empty":  1.01,
@@ -353,6 +355,7 @@ def _fuse_with_priors_and_veto(
             progress_callback(f"Fusing {mat_name}", mask_idx, len(fusion_inputs))
 
         with rasterio.open(mask_path) as msk_src:
+            mask_nodata = msk_src.nodata
             same_grid = (
                 msk_src.width == W
                 and msk_src.height == H
@@ -380,6 +383,12 @@ def _fuse_with_priors_and_veto(
                     resampling=_Resampling.nearest,
                 )
 
+        # A user-supplied water_mask raster may carry a nodata value (e.g.
+        # 255 on a uint8 band); unmasked, those pixels read as > 0 and paint
+        # as water. Shapefile-rasterised road/building masks set no nodata,
+        # so this is a no-op for them.
+        if mask_nodata is not None:
+            mask_band = np.where(mask_band == mask_nodata, 0, mask_band)
         bool_mask = mask_band > 0
         if not bool_mask.any():
             fusion_stats[mat_name] = {"source": source, "vetoed": 0, "total": 0}
@@ -454,9 +463,7 @@ def apply_v6_masks_to_classification(
     classes: List[Dict[str, Any]],
     classify_result: Optional[Dict[str, Any]] = None,
     sam3_enabled: bool = True,
-    road_shapefile: Optional[str] = None,
-    building_shapefile: Optional[str] = None,
-    water_shapefile: Optional[str] = None,
+    water_mask: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
     mask_output_dir: Optional[str] = None,
     tile_paths: Optional[List[str]] = None,
@@ -488,29 +495,30 @@ def apply_v6_masks_to_classification(
         return _inner
 
     # ── Phase 0: Mask acquisition ──────────────────────────────────────────
-    # Water is shapefile-only by design (sam3_enabled=False) — never detected
-    # by SAM3 or KMeans color matching.  No shapefile -> no water painted.
+    # Water is a pre-rasterised GeoTIFF (band 1 > 0 = water) painted directly
+    # — no shapefile resolve, no SAM3. A per-call override wins over the
+    # configured water_mask; neither set -> no water painted.
     #
-    # For each feature type we ask shapefile_resolver to convert a possibly-
-    # huge configured shapefile (or set of regional shapefiles) into a single
-    # trimmed .shp covering only the ortho's bounds. An explicit per-call
-    # path (e.g. CLI override) wins outright. None means "no shapefile" —
-    # the caller falls back to SAM3 / no-mask via _acquire_mask.
-    from . import shapefile_resolver
+    # Roads and buildings are pulled per-raster from the configured SDE layers
+    # by shapefile_resolver (roads buffered to road-width polygons there).
+    # None means "no SDE features" — _acquire_mask then falls back to SAM3 /
+    # no-mask.
+    from . import shapefile_resolver, shapefile_config
 
-    water_resolved = shapefile_resolver.resolve_shapefile(raster_path, "water", water_shapefile)
-    water_mask_path, water_source = _acquire_mask(
-        raster_path, "water", water_resolved, sam3_enabled=False,
-        progress_callback=_phase_cb("Water (shapefile)"),
-        mask_output_dir=mask_output_dir,
-    )
-    road_resolved = shapefile_resolver.resolve_shapefile(raster_path, "roads", road_shapefile)
+    water_cfg = water_mask or shapefile_config.get_water_mask()
+    if water_cfg and Path(water_cfg).exists():
+        water_mask_path, water_source = water_cfg, "raster"
+    else:
+        if water_cfg:
+            print(f"[pipeline] water: water_mask not found at {water_cfg!r}")
+        water_mask_path, water_source = None, "disabled"
+    road_resolved = shapefile_resolver.resolve_shapefile(raster_path, "roads")
     road_mask_path, road_source = _acquire_mask(
         raster_path, "roads", road_resolved, sam3_enabled,
         progress_callback=_phase_cb("Roads (SAM3)"),
         mask_output_dir=mask_output_dir,
     )
-    bldg_resolved = shapefile_resolver.resolve_shapefile(raster_path, "buildings", building_shapefile)
+    bldg_resolved = shapefile_resolver.resolve_shapefile(raster_path, "buildings")
     bldg_mask_path, bldg_source = _acquire_mask(
         raster_path, "buildings", bldg_resolved, sam3_enabled,
         progress_callback=_phase_cb("Buildings (SAM3)"),
@@ -650,9 +658,7 @@ def classify_v6(
     feature_flags: Dict[str, bool],
     output_path: Optional[str] = None,
     sam3_enabled: bool = True,
-    road_shapefile: Optional[str] = None,
-    building_shapefile: Optional[str] = None,
-    water_shapefile: Optional[str] = None,
+    water_mask: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
     **classify_kwargs: Any,
 ) -> Dict[str, Any]:
@@ -666,9 +672,7 @@ def classify_v6(
     print("PIPELINE v6: SAM3-first 6-material classification")
     print(f"  raster:             {raster.name}")
     print(f"  sam3_enabled:       {sam3_enabled}")
-    print(f"  road_shapefile:     {road_shapefile!r}")
-    print(f"  building_shapefile: {building_shapefile!r}")
-    print(f"  water_shapefile:    {water_shapefile!r}")
+    print(f"  water_mask:         {water_mask!r}")
     print("=" * 70)
 
     t_start = _time.perf_counter()
@@ -708,9 +712,7 @@ def classify_v6(
         classes=classes,
         classify_result=classify_result,
         sam3_enabled=sam3_enabled,
-        road_shapefile=road_shapefile,
-        building_shapefile=building_shapefile,
-        water_shapefile=water_shapefile,
+        water_mask=water_mask,
         progress_callback=progress_callback,
         mask_output_dir=output_path,
         tile_paths=classify_result.get("tileOutputs"),

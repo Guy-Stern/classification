@@ -26,6 +26,9 @@ SYNC_PAIRS: List[Tuple[str, List[str]]] = [
     ("backend/app/core.py", [
         "offline_installer/app/backend/app/core.py",
     ]),
+    ("backend/app/config.py", [
+        "offline_installer/app/backend/app/config.py",
+    ]),
     ("backend/app/main.py", [
         "offline_installer/app/backend/app/main.py",
     ]),

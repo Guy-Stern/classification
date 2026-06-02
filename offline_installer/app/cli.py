@@ -8,8 +8,9 @@ TWO INVOCATION STYLES
       cli.py <input_path> <output_path>
 
       Defaults to the 6-material MEA pipeline (--mea --sam3-enabled).
-      Shapefile paths are taken from shapefile_config.json (next to
-      app_config.json — see "SHAPEFILE CONFIG" below).
+      SDE (buildings/roads) + water_mask config are read from
+      shapefile_config.json (next to app_config.json — see
+      "SHAPEFILE CONFIG" below).
 
   Flag-based (full control):
       cli.py --input <file_or_folder> --classes <N>
@@ -18,9 +19,7 @@ TWO INVOCATION STYLES
              [--workers <N>] [--tiling] [--max-threads]
              [--no-spectral] [--no-texture] [--indices]
              [--detect-shadows]
-             [--mea] [--no-sam3]
-             [--road-shapefile <path>] [--building-shapefile <path>]
-             [--water-shapefile <path>]
+             [--mea] [--no-sam3] [--water-mask <path>]
 
 Parameter meanings:
 
@@ -94,50 +93,43 @@ Parameter meanings:
         Disable the SAM3 mask stage in --mea mode (KMeans-only fallback).
         Default: SAM3 enabled when --mea is set.
 
-    --road-shapefile PATH
-        Path to a roads shapefile (.shp). Overrides SAM3 road masks
-        when provided. --mea only.
-
-    --building-shapefile PATH
-        Path to a buildings shapefile (.shp). Overrides SAM3 building
-        masks when provided. --mea only.
-
-    --water-shapefile PATH
-        Path to a water-bodies shapefile (.shp). Required for BM_WATER
-        in --mea mode (water is shapefile-only — no SAM3 stage).
+    --water-mask PATH
+        Path to a water-mask GeoTIFF (band 1 > 0 = water). Painted
+        directly as BM_WATER. Overrides the water_mask configured in
+        shapefile_config.json for this run. --mea only.
 
 SHAPEFILE CONFIG (shapefile_config.json)
 ────────────────────────────────────────────────────────────────────────
 Lives next to app_config.json (project root in dev, install dir for
-the bundled exe). Each list may contain multiple paths — the resolver
-unions every shapefile whose envelope intersects the ortho's bounds.
-Use this when you have nationwide / state-level shapefiles too large
-to pass per-call.
+the bundled exe). Buildings and roads are pulled per-raster from an Esri
+enterprise geodatabase (the "sde" block); water is a single raster mask.
 
     {
-      "buildings": [
-        "C:/data/buildings_NY.shp",
-        "C:/data/buildings_NJ.shp"
-      ],
-      "roads": [
-        "C:/data/roads_USA.shp"
-      ],
-      "water": [
-        "C:/data/water_NY.shp"
-      ]
+      "water_mask": "C:/data/water_mask.tif",
+      "sde": {
+        "enabled": true,
+        "connection_file": "C:/data/conn.sde",
+        "arcpy_python": "C:/.../arcgispro-py3/python.exe",
+        "tile_size_metres": 5000,
+        "timeout_seconds": 1800,
+        "road_width_attr": "WIDTH",
+        "road_width_fallback_m": 2.0,
+        "layers": { "buildings": "GDB.SCHEMA.BUILDINGS",
+                    "roads": "GDB.SCHEMA.ROADS" }
+      }
     }
 
 Behavior:
-  - For each ortho, the resolver buffers the raster bounds (~50 m),
-    reprojects them to each shapefile's CRS, and reads only the features
-    that intersect — geometries are kept whole (never clipped through).
-  - Features from all matching shapefiles are unioned into one mask, in
-    the ortho's CRS, and handed to the rasterizer.
-  - --road-shapefile / --building-shapefile / --water-shapefile, when
-    passed, OVERRIDE the config for that feature type (no trim, no
-    union — the file is used as-is).
-  - Empty list (or no entry) → SAM3 takes over for that feature type
-    (or, for water, no painting since v6 water is shapefile-only).
+  - water_mask: a georeferenced GeoTIFF where band 1 > 0 marks water.
+    Covers the whole AOI; it's reprojected/clipped to each ortho
+    automatically and painted as BM_WATER. "" = no water painted.
+  - sde: per ortho, building/road features are extracted for the
+    raster's footprint via an arcpy subprocess. Road LINES are buffered
+    to polygons using road_width_attr (full width in metres; <=10-char
+    field name) or road_width_fallback_m (default 2 m) when absent.
+  - --water-mask overrides water_mask for a single run.
+  - SDE disabled / no features → SAM3 takes over for roads & buildings
+    (water only paints when a water_mask is set).
 
 Examples:
 
@@ -165,13 +157,10 @@ Examples:
     # ── Flag-based MEA (SAM3-first) — same pipeline the GUI uses ──
     python cli.py --input photo.tif --mea --output C:\\results\\
 
-    # MEA with explicit shapefiles overriding both config + SAM3:
-    python cli.py photo.tif out.tif ^
-        --road-shapefile roads.shp ^
-        --building-shapefile buildings.shp ^
-        --water-shapefile water.shp
+    # MEA with an explicit water mask (overrides the config water_mask):
+    python cli.py photo.tif out.tif --water-mask water_mask.tif
 
-    # MEA, KMeans-only (no SAM3, no config shapefiles — water will be empty):
+    # MEA, KMeans-only (no SAM3, no SDE — roads/buildings/water empty):
     python cli.py photo.tif out.tif --no-sam3
 """
 
@@ -330,9 +319,7 @@ def run_single(
             raster_path=raster_path,
             classes=classes,
             sam3_enabled=getattr(args, "sam3_enabled", True),
-            road_shapefile=getattr(args, "road_shapefile", None),
-            building_shapefile=getattr(args, "building_shapefile", None),
-            water_shapefile=getattr(args, "water_shapefile", None),
+            water_mask=getattr(args, "water_mask", None),
             **v6_kwargs,
         )
         if result.get("status") != "ok":
@@ -386,8 +373,8 @@ def main():
             "Classify raster imagery by material classes from the command line.\n\n"
             "Two invocation styles:\n"
             "  Simple:   cli.py <input> <output>\n"
-            "            (defaults to --mea --sam3-enabled; reads shapefiles\n"
-            "            from shapefile_config.json next to app_config.json.)\n\n"
+            "            (defaults to --mea --sam3-enabled; reads SDE +\n"
+            "            water_mask config from shapefile_config.json.)\n\n"
             "  Detailed: cli.py --input ... --classes ... [other flags]\n\n"
             "For a full guide, parameter docs, the shapefile_config.json schema,\n"
             "and examples: python cli.py --examples"
@@ -562,26 +549,13 @@ def main():
         help="Disable the SAM3 mask stage in --mea mode (KMeans-only fallback).",
     )
     parser.add_argument(
-        "--road-shapefile",
+        "--water-mask",
         default=None,
         metavar="PATH",
-        dest="road_shapefile",
-        help="Roads shapefile (.shp). Overrides SAM3 road masks. --mea only.",
-    )
-    parser.add_argument(
-        "--building-shapefile",
-        default=None,
-        metavar="PATH",
-        dest="building_shapefile",
-        help="Buildings shapefile (.shp). Overrides SAM3 building masks. --mea only.",
-    )
-    parser.add_argument(
-        "--water-shapefile",
-        default=None,
-        metavar="PATH",
-        dest="water_shapefile",
-        help="Water-bodies shapefile (.shp). Required for BM_WATER (water is\n"
-             "shapefile-only — no SAM3 stage). --mea only.",
+        dest="water_mask",
+        help="Water-mask GeoTIFF (band 1 > 0 = water). Painted directly as\n"
+             "BM_WATER. Overrides the water_mask in shapefile_config.json for\n"
+             "this run. --mea only.",
     )
     parser.add_argument(
         "--vector-class",
@@ -624,7 +598,7 @@ def main():
     if used_simple_form and not args.mea and args.classes is None:
         args.mea = True
         print("[cli] simple positional form: defaulting to --mea --sam3-enabled "
-              "(shapefile paths from shapefile_config.json)")
+              "(SDE + water_mask config from shapefile_config.json)")
 
     # ── Require input + (classes or mea) ───────────────────────────────────────
     if args.input is None:

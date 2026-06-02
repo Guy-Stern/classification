@@ -1,28 +1,24 @@
-"""Persistent paths for road / building / water shapefiles used as
-mask priors during 6-material MEA classification.
+"""Persistent config for 6-material MEA mask priors.
 
-This is a parallel to ``app_config.json`` but list-shaped: each feature
-type can have multiple source shapefiles (e.g. one per state or region),
-and the resolver picks/unions the relevant ones at runtime based on the
-ortho's bounds.
+Lives next to ``app_config.json`` (frozen exe dir or repo root in dev)
+so users can edit it directly with any text editor. Two concerns:
 
-The file lives next to ``app_config.json`` (frozen exe dir or repo root
-in dev) so users can edit it directly with any text editor.
-
-Optionally, an ``sde`` block configures direct extraction from an Esri
-enterprise geodatabase via an arcpy subprocess worker (Path B stopgap —
-see ``sde_extractor.py``). When enabled, the resolver pulls features
-per-raster from SDE and unions them with any configured file-based
-shapefiles before rasterising.
+  * ``water_mask`` — a single georeferenced GeoTIFF (band 1 > 0 = water)
+    painted directly as BM_WATER. No vector resolve / rasterise.
+  * ``sde`` — direct extraction of building / road features from an Esri
+    enterprise geodatabase via an arcpy subprocess worker (Path B — see
+    ``sde_extractor.py``). ``road_width_attr`` / ``road_width_fallback_m``
+    drive line→polygon buffering of road features (see
+    ``shapefile_resolver``).
 """
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from . import config as _app_config
 
 _CONFIG_FILE = _app_config._config_dir() / "shapefile_config.json"
 
-_FEATURE_TYPES = ("buildings", "roads", "water")
+_FEATURE_TYPES = ("buildings", "roads")
 
 # Default skeleton for the optional ``sde`` block. Mirrored in
 # installer_assets/Post-Install.bat's config-template logic so a fresh
@@ -33,6 +29,8 @@ _SDE_DEFAULT: Dict[str, Any] = {
     "arcpy_python": "",             # path to ArcGIS Pro's python.exe (has arcpy)
     "tile_size_metres": 5000,       # split bounds into 5 km tiles by default
     "timeout_seconds": 1800,        # 30 min ceiling for the arcpy subprocess
+    "road_width_attr": "",          # SDE field with full road width in metres (<=10 chars; "" -> use fallback)
+    "road_width_fallback_m": 2.0,   # total road width (m) when the attr is missing/<=0; buffer radius = this/2
     "layers": {ft: "" for ft in _FEATURE_TYPES},
 }
 
@@ -50,7 +48,7 @@ def load() -> Dict[str, Any]:
     if _cache is not None:
         return _cache
 
-    cfg: Dict[str, Any] = {ft: [] for ft in _FEATURE_TYPES}
+    cfg: Dict[str, Any] = {"water_mask": ""}
     cfg["sde"] = dict(_SDE_DEFAULT)
     cfg["sde"]["layers"] = dict(_SDE_DEFAULT["layers"])
 
@@ -61,13 +59,8 @@ def load() -> Dict[str, Any]:
             with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
                 stored = json.load(f)
             print(f"[debug-config] loaded JSON with top-level keys: {sorted(stored.keys())}")
-            for ft in _FEATURE_TYPES:
-                value = stored.get(ft, [])
-                if isinstance(value, list):
-                    cfg[ft] = [str(p) for p in value if p]
-                    print(f"[debug-config] file-shapefiles[{ft}] = {cfg[ft]}")
-                else:
-                    print(f"[shapefile_config] {ft!r} is not a list, ignoring")
+            cfg["water_mask"] = str(stored.get("water_mask") or "").strip()
+            print(f"[debug-config] water_mask = {cfg['water_mask']!r}")
             sde_stored = stored.get("sde")
             if isinstance(sde_stored, dict):
                 print(f"[debug-config] found 'sde' block with keys: {sorted(sde_stored.keys())}")
@@ -84,6 +77,8 @@ def load() -> Dict[str, Any]:
                 print(f"[debug-config] final sde.arcpy_python    = {cfg['sde'].get('arcpy_python')!r}")
                 print(f"[debug-config] final sde.tile_size_metres= {cfg['sde'].get('tile_size_metres')!r}")
                 print(f"[debug-config] final sde.timeout_seconds = {cfg['sde'].get('timeout_seconds')!r}")
+                print(f"[debug-config] final sde.road_width_attr = {cfg['sde'].get('road_width_attr')!r}")
+                print(f"[debug-config] final sde.road_width_fb_m = {cfg['sde'].get('road_width_fallback_m')!r}")
                 print(f"[debug-config] final sde.layers          = {cfg['sde'].get('layers')!r}")
             else:
                 print(f"[debug-config] no 'sde' block in JSON — using defaults (enabled=False)")
@@ -104,9 +99,8 @@ def save(updates: Dict[str, Any]) -> Dict[str, Any]:
     """
     global _cache
     cfg = load()
-    for ft, paths in updates.items():
-        if ft in _FEATURE_TYPES and isinstance(paths, list):
-            cfg[ft] = [str(p) for p in paths if p]
+    if "water_mask" in updates:
+        cfg["water_mask"] = str(updates["water_mask"] or "").strip()
     if isinstance(updates.get("sde"), dict):
         sde_update = updates["sde"]
         for key, default in _SDE_DEFAULT.items():
@@ -130,13 +124,13 @@ def save(updates: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def get(feature_type: str) -> List[str]:
-    """Return the list of shapefile paths configured for ``feature_type``.
+def get_water_mask() -> str:
+    """Return the configured water-mask raster path (``""`` if unset).
 
-    Empty list if none configured or if the feature type is unknown.
+    Water is painted from this single georeferenced GeoTIFF (band 1 > 0 =
+    water) — see ``pipeline.apply_v6_masks_to_classification``.
     """
-    value = load().get(feature_type, [])
-    return list(value) if isinstance(value, list) else []
+    return str(load().get("water_mask") or "")
 
 
 def get_sde() -> Dict[str, Any]:

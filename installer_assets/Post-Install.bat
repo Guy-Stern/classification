@@ -107,19 +107,18 @@ echo.
 echo [3/3] Ensuring shapefile_config.json exists at install root...
 if not exist "%INSTALL_DIR%\shapefile_config.json" (
     > "%INSTALL_DIR%\shapefile_config.json" echo {
-    >>"%INSTALL_DIR%\shapefile_config.json" echo   "buildings": [],
-    >>"%INSTALL_DIR%\shapefile_config.json" echo   "roads": [],
-    >>"%INSTALL_DIR%\shapefile_config.json" echo   "water": [],
+    >>"%INSTALL_DIR%\shapefile_config.json" echo   "water_mask": "",
     >>"%INSTALL_DIR%\shapefile_config.json" echo   "sde": {
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "enabled": true,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "connection_file": "SET_ME_path_to_your_connection.sde",
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "arcpy_python": "C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe",
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "tile_size_metres": 5000,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "timeout_seconds": 1800,
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "road_width_attr": "",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "road_width_fallback_m": 2.0,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "layers": {
     >>"%INSTALL_DIR%\shapefile_config.json" echo       "buildings": "SET_ME_GDB.SCHEMA.BUILDINGS",
-    >>"%INSTALL_DIR%\shapefile_config.json" echo       "roads": "SET_ME_GDB.SCHEMA.ROADS",
-    >>"%INSTALL_DIR%\shapefile_config.json" echo       "water": "SET_ME_GDB.SCHEMA.WATER"
+    >>"%INSTALL_DIR%\shapefile_config.json" echo       "roads": "SET_ME_GDB.SCHEMA.ROADS"
     >>"%INSTALL_DIR%\shapefile_config.json" echo     }
     >>"%INSTALL_DIR%\shapefile_config.json" echo   }
     >>"%INSTALL_DIR%\shapefile_config.json" echo }

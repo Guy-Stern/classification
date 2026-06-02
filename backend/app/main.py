@@ -196,12 +196,10 @@ class ClassifyRequest(BaseModel):
     maxThreads: int | None = None
     taskId: str | None = None
     # 6-material SAM3-first pipeline controls (v6).  When the request's classes
-    # match the 6-material MEA schema, these fields decide how road/building
-    # pixels are produced.
+    # match the 6-material MEA schema, these fields decide how the water mask
+    # is sourced (buildings/roads come from the configured SDE layers).
     sam3Enabled: bool = True
-    roadShapefile: str | None = None
-    buildingShapefile: str | None = None
-    waterShapefile: str | None = None
+    waterMask: str | None = None
 
 
 class ClassifyStep1Request(BaseModel):
@@ -221,9 +219,7 @@ class ClassifyStep1Request(BaseModel):
     maxThreads: int | None = None
     taskId: str | None = None
     sam3Enabled: bool = True
-    roadShapefile: str | None = None
-    buildingShapefile: str | None = None
-    waterShapefile: str | None = None
+    waterMask: str | None = None
 
 
 class ClassifyStep2Request(BaseModel):
@@ -370,7 +366,6 @@ def classify(request: ClassifyRequest) -> dict:
     try:
         if use_v6:
             print("[API /classify] routing -> classify_v6 (SAM3-first 6-material pipeline)")
-            water_shp = request.waterShapefile or _load_config().get("water_mask_path")
             result = run_classify_v6(
                 raster_path=request.rasterPath,
                 classes=classes_dict,
@@ -378,9 +373,7 @@ def classify(request: ClassifyRequest) -> dict:
                 feature_flags=request.featureFlags.model_dump(),
                 output_path=request.outputPath,
                 sam3_enabled=request.sam3Enabled,
-                road_shapefile=request.roadShapefile,
-                building_shapefile=request.buildingShapefile,
-                water_shapefile=water_shp,
+                water_mask=request.waterMask,
                 tile_mode=request.tileMode,
                 tile_max_pixels=request.tileMaxPixels or 512 * 512,
                 tile_overlap=request.tileOverlap,
@@ -454,7 +447,6 @@ def classify_step1(request: ClassifyStep1Request) -> dict:
     try:
         if use_v6:
             print("[API /classify-step1] routing -> classify_v6 (SAM3-first 6-material pipeline)")
-            water_shp = request.waterShapefile or _load_config().get("water_mask_path")
             result = run_classify_v6(
                 raster_path=request.rasterPath,
                 classes=classes_dict,
@@ -462,9 +454,7 @@ def classify_step1(request: ClassifyStep1Request) -> dict:
                 feature_flags=request.featureFlags.model_dump(),
                 output_path=request.outputPath,
                 sam3_enabled=request.sam3Enabled,
-                road_shapefile=request.roadShapefile,
-                building_shapefile=request.buildingShapefile,
-                water_shapefile=water_shp,
+                water_mask=request.waterMask,
                 tile_mode=request.tileMode,
                 tile_max_pixels=request.tileMaxPixels or 512 * 512,
                 tile_overlap=request.tileOverlap,
@@ -525,9 +515,7 @@ class BatchClassifyRequest(BaseModel):
     # SAM3-first 6-material pipeline flags (only consulted when the request's
     # `classes` payload matches the canonical 6-material MEA schema).
     sam3Enabled: bool = True
-    roadShapefile: str | None = None
-    buildingShapefile: str | None = None
-    waterShapefile: str | None = None
+    waterMask: str | None = None
 
 
 @app.post("/classify-batch")
@@ -632,7 +620,6 @@ def classify_batch(request: BatchClassifyRequest) -> dict:
                     classified_path = result.get("outputPath")
                     if classified_path:
                         try:
-                            water_shp = request.waterShapefile or _load_config().get("water_mask_path")
                             this_tile_paths = result.get("tileOutputs") or None
                             result = apply_v6_masks_to_classification(
                                 classification_path=classified_path,
@@ -640,9 +627,7 @@ def classify_batch(request: BatchClassifyRequest) -> dict:
                                 classes=classes_raw,
                                 classify_result=result,
                                 sam3_enabled=request.sam3Enabled,
-                                road_shapefile=request.roadShapefile,
-                                building_shapefile=request.buildingShapefile,
-                                water_shapefile=water_shp,
+                                water_mask=request.waterMask,
                                 progress_callback=tracker,
                                 mask_output_dir=request.outputPath,
                                 tile_paths=this_tile_paths,
@@ -972,7 +957,6 @@ class AppConfigUpdate(BaseModel):
     sam3_local_dir: str | None = None
     hf_cache_dir: str | None = None
     offline_mode: bool | None = None
-    water_mask_path: str | None = None
 
 
 @app.get("/app-config")
