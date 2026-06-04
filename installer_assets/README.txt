@@ -85,8 +85,16 @@ This build ships with SDE extraction ENABLED in shapefile_config.json
 classification it pulls building / road features for the raster's
 footprint straight from an Esri enterprise geodatabase, using a worker
 that runs under ArcGIS Pro's Python (arcpy). Road lines are buffered to
-polygons using their width attribute. Water is painted separately from a
-raster mask (see "water_mask" below).
+polygons using a 3-tier width (explicit width field -> road-type width ->
+fallback; see road_width_attr / Road_Type_* below). Water is painted
+separately from a raster mask (see "water_mask" below).
+
+A fully filled-in reference, with every SDE and road-width field
+populated, ships next to this README as
+  shapefile_config.example.json
+(also copied into the install dir by Post-Install.bat). Copy values
+from it; do NOT rename it over your live config unless you've edited
+the paths to match your machine.
 
 To finish wiring it, edit the "sde" block in
   <install dir>\shapefile_config.json
@@ -100,14 +108,29 @@ and replace the SET_ME_ placeholders:
   layers            The feature-class names in the geodatabase for
                     buildings / roads, e.g. "MYDB.SDE.BUILDINGS".
 
-  road_width_attr   Field on the road features holding the FULL road
-                    width in metres (used to buffer road lines into
+  Road width is resolved per road feature in 3 tiers, top to bottom:
+
+  road_width_attr   TIER 1. Field on the road features holding the FULL
+                    road width in metres (used to buffer road lines into
                     polygons). ESRI shapefiles truncate field names to
-                    10 chars, so use the truncated name. Leave "" to
-                    always use the fallback.
+                    10 chars, so use the truncated name. Leave "" (or a
+                    value <= 0 on a feature) to fall through to tier 2.
+
+  Road_Type_Attr    TIER 2. Field holding the road type/class (also <= 10
+                    chars). When a road has no usable road_width_attr, its
+                    Road_Type_Attr value is matched (case-insensitively)
+                    against the two keys below to pick a width. Leave ""
+                    to skip this tier entirely.
+  Road_Type_Key_MainRoad / Road_Type_Width_MainRoad_m
+                    The Road_Type_Attr value that marks a MAIN road, and
+                    the full width in metres to give it.
+  Road_Type_Key_SideRoad / Road_Type_Width_SideRoad_m
+                    Same for SIDE roads. (A matched type whose width is
+                    <= 0 falls through to the fallback.)
+
   road_width_fallback_m
-                    Road width in metres when road_width_attr is missing
-                    or <= 0 (default 2.0).
+                    TIER 3. Road width in metres when none of the above
+                    applies (default 2.0).
 
   water_mask        Full path to a single-band GeoTIFF where band 1 > 0
                     marks water. Covers the whole AOI; it's reprojected /

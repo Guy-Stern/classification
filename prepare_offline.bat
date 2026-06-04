@@ -375,6 +375,10 @@ if exist "installer_assets\README.txt" (
     copy /y "installer_assets\README.txt" "README.txt" >nul
     echo    README.txt placed at project root.
 )
+if exist "installer_assets\shapefile_config.example.json" (
+    copy /y "installer_assets\shapefile_config.example.json" "shapefile_config.example.json" >nul
+    echo    shapefile_config.example.json placed at project root.
+)
 if exist "installer_assets\sam3_runtime" (
     if not exist "sam3_runtime" mkdir "sam3_runtime" >nul 2>&1
     xcopy /e /i /y /q "installer_assets\sam3_runtime" "sam3_runtime\" >nul

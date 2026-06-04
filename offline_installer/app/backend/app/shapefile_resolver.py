@@ -189,7 +189,14 @@ def resolve_shapefile(
         sde_cfg = shapefile_config.get_sde()
         width_attr = str(sde_cfg.get("road_width_attr") or "")
         fallback_m = float(sde_cfg.get("road_width_fallback_m") or 2.0)
-        merged = _buffer_road_lines(merged, raster_crs, width_attr, fallback_m)
+        merged = _buffer_road_lines(
+            merged, raster_crs, width_attr, fallback_m,
+            type_attr=str(sde_cfg.get("Road_Type_Attr") or ""),
+            main_key=str(sde_cfg.get("Road_Type_Key_MainRoad") or ""),
+            main_w=float(sde_cfg.get("Road_Type_Width_MainRoad_m") or 0.0),
+            side_key=str(sde_cfg.get("Road_Type_Key_SideRoad") or ""),
+            side_w=float(sde_cfg.get("Road_Type_Width_SideRoad_m") or 0.0),
+        )
         if merged.empty:
             print(f"[shapefile_resolver] roads: nothing left after buffering -> None")
             return None
@@ -223,38 +230,124 @@ def _bounds_buffer_in_raster_units(raster_crs) -> float:
     return _metres_to_crs_units(_BOUNDS_BUFFER_METRES, raster_crs)
 
 
-def _buffer_road_lines(gdf, raster_crs, width_attr: str, fallback_m: float):
+def _as_positive_float(value) -> Optional[float]:
+    """Return ``float(value)`` when it parses to a number > 0, else ``None``.
+
+    NaN (geopandas fills missing numeric cells with NaN) is treated as
+    absent — ``nan > 0`` is False.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def _type_matches(type_val, key) -> bool:
+    """Case-insensitive, whitespace-trimmed match of a feature's road-type
+    value against a configured key.
+
+    A blank/None key or a blank/None feature value never matches, so an
+    unconfigured road-type tier is simply skipped.
+    """
+    if key is None:
+        return False
+    key_s = str(key).strip()
+    if not key_s:
+        return False
+    if type_val is None:
+        return False
+    val_s = str(type_val).strip()
+    if not val_s:
+        return False
+    return val_s.lower() == key_s.lower()
+
+
+def _road_width_m(
+    width_val,
+    type_val,
+    *,
+    main_key,
+    main_w,
+    side_key,
+    side_w,
+    fallback_m,
+) -> float:
+    """Return the full road width (metres) for one road feature.
+
+    3-tier fallback:
+      1. ``width_val`` (the ``road_width_attr`` value) when it is a number > 0.
+      2. else ``type_val`` matched against the configured main/side road-type
+         keys -> ``main_w`` / ``side_w`` (each used only when > 0). Main wins
+         when both keys are equal.
+      3. else ``fallback_m``.
+    """
+    explicit = _as_positive_float(width_val)
+    if explicit is not None:
+        return explicit
+
+    if _type_matches(type_val, main_key):
+        mw = _as_positive_float(main_w)
+        if mw is not None:
+            return mw
+    if _type_matches(type_val, side_key):
+        sw = _as_positive_float(side_w)
+        if sw is not None:
+            return sw
+
+    return float(fallback_m)
+
+
+def _buffer_road_lines(
+    gdf,
+    raster_crs,
+    width_attr: str,
+    fallback_m: float,
+    *,
+    type_attr: str = "",
+    main_key: str = "",
+    main_w: float = 0.0,
+    side_key: str = "",
+    side_w: float = 0.0,
+):
     """Buffer road LINE geometries into road-width polygons.
 
-    Each feature is buffered by HALF of its width: the ``width_attr`` value
-    (full road width in metres) when present and > 0, else ``fallback_m``.
+    Each feature is buffered by HALF of the full width returned by
+    ``_road_width_m`` — the explicit ``width_attr`` value, else a road-type
+    (``type_attr`` -> main/side) width, else ``fallback_m`` (all metres).
     Half-widths are converted from metres to the raster CRS's units so a 2 m
     road stays 2 m wide instead of 2 degrees on a geographic CRS. Flat
     end-caps (cap_style="flat") avoid overshoot past endpoints; round joins
     keep bends connected.
+
+    With no road-type config (``type_attr``/keys blank) this reduces to the
+    original two-tier behaviour: ``width_attr`` else ``fallback_m``.
     """
-    fallback_half = _metres_to_crs_units(fallback_m / 2.0, raster_crs)
+    n = len(gdf)
+    width_vals = list(gdf[width_attr]) if (width_attr and width_attr in gdf.columns) else [None] * n
+    type_vals = list(gdf[type_attr]) if (type_attr and type_attr in gdf.columns) else [None] * n
 
-    def _half_units(value) -> float:
-        try:
-            w = float(value)
-        except (TypeError, ValueError):
-            return fallback_half
-        return _metres_to_crs_units(w / 2.0, raster_crs) if w > 0 else fallback_half
+    if width_attr and width_attr not in gdf.columns:
+        print(f"[shapefile_resolver] roads: width attr {width_attr!r} not found in "
+              f"columns {list(gdf.columns)} — falling back to road-type / {fallback_m} m")
+    if type_attr and type_attr not in gdf.columns:
+        print(f"[shapefile_resolver] roads: type attr {type_attr!r} not found in "
+              f"columns {list(gdf.columns)} — road-type tier disabled")
 
-    if width_attr and width_attr in gdf.columns:
-        distances = [_half_units(v) for v in gdf[width_attr]]
-    else:
-        if width_attr:
-            print(f"[shapefile_resolver] roads: width attr {width_attr!r} not found in "
-                  f"columns {list(gdf.columns)} — using {fallback_m} m fallback for all")
-        distances = [fallback_half] * len(gdf)
+    distances = [
+        _metres_to_crs_units(
+            _road_width_m(w, t, main_key=main_key, main_w=main_w,
+                          side_key=side_key, side_w=side_w, fallback_m=fallback_m) / 2.0,
+            raster_crs,
+        )
+        for w, t in zip(width_vals, type_vals)
+    ]
 
     out = gdf.copy()
     out["geometry"] = gdf.geometry.buffer(distances, cap_style="flat")
     out = out[~(out.geometry.is_empty | out.geometry.isna())]
     print(f"[shapefile_resolver] roads: buffered {len(out)} feature(s) to polygons "
-          f"(attr={width_attr or '—'}, fallback={fallback_m} m)")
+          f"(attr={width_attr or '—'}, type={type_attr or '—'}, fallback={fallback_m} m)")
     return out
 
 

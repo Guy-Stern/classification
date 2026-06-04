@@ -1,0 +1,21 @@
+{
+  "water_mask": "C:/ClassificationApp/masks/aoi_water_mask.tif",
+  "sde": {
+    "enabled": true,
+    "connection_file": "C:/ClassificationApp/sde/prod_readonly.sde",
+    "arcpy_python": "C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe",
+    "tile_size_metres": 5000,
+    "timeout_seconds": 1800,
+    "road_width_attr": "WIDTH_M",
+    "Road_Type_Attr": "ROAD_CLASS",
+    "Road_Type_Key_MainRoad": "MAIN",
+    "Road_Type_Width_MainRoad_m": 8.0,
+    "Road_Type_Key_SideRoad": "SIDE",
+    "Road_Type_Width_SideRoad_m": 4.0,
+    "road_width_fallback_m": 2.0,
+    "layers": {
+      "buildings": "PROD.GIS.BUILDINGS",
+      "roads": "PROD.GIS.ROADS"
+    }
+  }
+}

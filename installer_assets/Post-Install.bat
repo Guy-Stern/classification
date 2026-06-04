@@ -115,6 +115,11 @@ if not exist "%INSTALL_DIR%\shapefile_config.json" (
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "tile_size_metres": 5000,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "timeout_seconds": 1800,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "road_width_attr": "",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "Road_Type_Attr": "",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "Road_Type_Key_MainRoad": "",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "Road_Type_Width_MainRoad_m": 0.0,
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "Road_Type_Key_SideRoad": "",
+    >>"%INSTALL_DIR%\shapefile_config.json" echo     "Road_Type_Width_SideRoad_m": 0.0,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "road_width_fallback_m": 2.0,
     >>"%INSTALL_DIR%\shapefile_config.json" echo     "layers": {
     >>"%INSTALL_DIR%\shapefile_config.json" echo       "buildings": "SET_ME_GDB.SCHEMA.BUILDINGS",
@@ -125,6 +130,15 @@ if not exist "%INSTALL_DIR%\shapefile_config.json" (
     echo   created  shapefile_config.json  ^(with sde block — edit connection_file + layers - see README^)
 ) else (
     echo   already exists, leaving alone.
+)
+
+:: ── [3b/3] Drop a filled-in example config next to the live one ────────
+:: A complete, realistic shapefile_config.json (all SDE + road-width tiers
+:: populated) the operator can copy values from. Never clobbers the live
+:: config — it lands under a distinct .example.json name.
+if exist "%~dp0shapefile_config.example.json" (
+    copy /y "%~dp0shapefile_config.example.json" "%INSTALL_DIR%\shapefile_config.example.json" >nul
+    echo   copied  shapefile_config.example.json  ^(reference — see README^)
 )
 
 echo.

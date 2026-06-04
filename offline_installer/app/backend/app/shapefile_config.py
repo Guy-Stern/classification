@@ -7,9 +7,10 @@ so users can edit it directly with any text editor. Two concerns:
     painted directly as BM_WATER. No vector resolve / rasterise.
   * ``sde`` — direct extraction of building / road features from an Esri
     enterprise geodatabase via an arcpy subprocess worker (Path B — see
-    ``sde_extractor.py``). ``road_width_attr`` / ``road_width_fallback_m``
-    drive line→polygon buffering of road features (see
-    ``shapefile_resolver``).
+    ``sde_extractor.py``). Road LINE features are buffered to polygons in
+    ``shapefile_resolver`` using a 3-tier width: ``road_width_attr`` (explicit
+    per-feature width), else a road-type width (``Road_Type_Attr`` ->
+    ``Road_Type_Width_Main/SideRoad_m``), else ``road_width_fallback_m``.
 """
 import json
 from typing import Any, Dict
@@ -29,8 +30,14 @@ _SDE_DEFAULT: Dict[str, Any] = {
     "arcpy_python": "",             # path to ArcGIS Pro's python.exe (has arcpy)
     "tile_size_metres": 5000,       # split bounds into 5 km tiles by default
     "timeout_seconds": 1800,        # 30 min ceiling for the arcpy subprocess
-    "road_width_attr": "",          # SDE field with full road width in metres (<=10 chars; "" -> use fallback)
-    "road_width_fallback_m": 2.0,   # total road width (m) when the attr is missing/<=0; buffer radius = this/2
+    # Road width is resolved per feature in 3 tiers (see shapefile_resolver._road_width_m):
+    "road_width_attr": "",            # tier 1: SDE field with full road width in metres (<=10 chars; "" -> tier 2)
+    "Road_Type_Attr": "",             # tier 2: SDE field holding the road type/class (<=10 chars; "" -> tier disabled)
+    "Road_Type_Key_MainRoad": "",     #         value of Road_Type_Attr that marks a MAIN road
+    "Road_Type_Width_MainRoad_m": 0.0,  #       full width (m) for main roads (<=0 -> fall through to fallback)
+    "Road_Type_Key_SideRoad": "",     #         value of Road_Type_Attr that marks a SIDE road
+    "Road_Type_Width_SideRoad_m": 0.0,  #       full width (m) for side roads (<=0 -> fall through to fallback)
+    "road_width_fallback_m": 2.0,     # tier 3: total road width (m) when nothing above applies; buffer radius = this/2
     "layers": {ft: "" for ft in _FEATURE_TYPES},
 }
 
@@ -78,6 +85,9 @@ def load() -> Dict[str, Any]:
                 print(f"[debug-config] final sde.tile_size_metres= {cfg['sde'].get('tile_size_metres')!r}")
                 print(f"[debug-config] final sde.timeout_seconds = {cfg['sde'].get('timeout_seconds')!r}")
                 print(f"[debug-config] final sde.road_width_attr = {cfg['sde'].get('road_width_attr')!r}")
+                print(f"[debug-config] final sde.Road_Type_Attr  = {cfg['sde'].get('Road_Type_Attr')!r}")
+                print(f"[debug-config] final sde.RT_MainRoad key/w= {cfg['sde'].get('Road_Type_Key_MainRoad')!r} / {cfg['sde'].get('Road_Type_Width_MainRoad_m')!r}")
+                print(f"[debug-config] final sde.RT_SideRoad key/w= {cfg['sde'].get('Road_Type_Key_SideRoad')!r} / {cfg['sde'].get('Road_Type_Width_SideRoad_m')!r}")
                 print(f"[debug-config] final sde.road_width_fb_m = {cfg['sde'].get('road_width_fallback_m')!r}")
                 print(f"[debug-config] final sde.layers          = {cfg['sde'].get('layers')!r}")
             else:
