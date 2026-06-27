@@ -467,6 +467,7 @@ def apply_v6_masks_to_classification(
     progress_callback: Optional[Callable] = None,
     mask_output_dir: Optional[str] = None,
     tile_paths: Optional[List[str]] = None,
+    single_fused_output: bool = False,
 ) -> Dict[str, Any]:
     """Apply SAM3 / shapefile road & building masks to an existing classification.
 
@@ -604,6 +605,23 @@ def apply_v6_masks_to_classification(
         except Exception as exc:
             print(f"[pipeline] warn: fused-tile consolidation failed: {exc}")
 
+    # ── Phase 2b-single: collapse the fused single-file result onto the ────
+    # user's requested path so callers that opt in (the CLI) get exactly one
+    # output — no separate unfused classification + ``_fused`` pair.  Mirrors
+    # the tile consolidation above; gated by ``single_fused_output`` so the
+    # web/batch callers keep their two-stage files untouched.  ``.txr``/``.xml``
+    # are stem-named off ``classification_path`` and ``all_imgs.txs`` is shared,
+    # so moving the fused raster over the unfused one needs no sidecar renaming;
+    # Phase 3 below rewrites the XML to the full 6-material table in place.
+    if single_fused_output and final_path != classification_path:
+        fin_p = Path(final_path)
+        if fin_p.is_file():
+            try:
+                fin_p.replace(Path(classification_path))
+                final_path = classification_path
+            except Exception as exc:
+                print(f"[pipeline] warn: single-output consolidation failed: {exc}")
+
     # ── Phase 3: Rewrite XML with full 6-material composite table ──────────
     # The KMeans pass wrote a 4-entry XML (one per kmeans-source material).
     # Now that masks have contributed BM_ASPHALT / BM_CONCRETE pixels, the
@@ -660,10 +678,15 @@ def classify_v6(
     sam3_enabled: bool = True,
     water_mask: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
+    single_fused_output: bool = False,
     **classify_kwargs: Any,
 ) -> Dict[str, Any]:
     """SAM3-first 6-material orchestrator.  Returns the same dict shape as
-    ``core.classify_and_export``."""
+    ``core.classify_and_export``.
+
+    ``single_fused_output`` (CLI opt-in): collapse the result to a single fused
+    raster at ``output_path`` instead of leaving the unfused KMeans output plus
+    a ``_fused`` copy.  Defaults False so the web/batch callers are unchanged."""
     raster = Path(raster_path)
     if not raster.exists():
         return {"status": "error", "message": f"Raster not found: {raster_path}"}
@@ -716,6 +739,7 @@ def classify_v6(
         progress_callback=progress_callback,
         mask_output_dir=output_path,
         tile_paths=classify_result.get("tileOutputs"),
+        single_fused_output=single_fused_output,
     )
 
     duration = _time.perf_counter() - t_start

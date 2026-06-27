@@ -320,6 +320,7 @@ def run_single(
             classes=classes,
             sam3_enabled=getattr(args, "sam3_enabled", True),
             water_mask=getattr(args, "water_mask", None),
+            single_fused_output=True,  # CLI: emit only the fused output, at the requested path
             **v6_kwargs,
         )
         if result.get("status") != "ok":
