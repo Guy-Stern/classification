@@ -704,16 +704,23 @@ def main():
 
         def _process_file(file_path: Path):
             out_path = derive_output(file_path, args.output, suffix, input_root=input_path)
-            result = run_single(
-                str(file_path),
-                out_path,
-                args,
-                classes,
-                pretrained_scaler=shared_scaler,
-                pretrained_kmeans=shared_kmeans,
-                pretrained_color_table=shared_color_table,
-                pretrained_mea_mapping=shared_mea_mapping,
-            )
+            try:
+                result = run_single(
+                    str(file_path),
+                    out_path,
+                    args,
+                    classes,
+                    pretrained_scaler=shared_scaler,
+                    pretrained_kmeans=shared_kmeans,
+                    pretrained_color_table=shared_color_table,
+                    pretrained_mea_mapping=shared_mea_mapping,
+                )
+            except Exception:
+                # Capture the real traceback so a per-file failure is diagnosable
+                # instead of being lost as a one-line message (the cause of the
+                # silent "17 tiles produced no output" in earlier batch runs).
+                import traceback as _tb
+                return ("error", str(file_path), _tb.format_exc())
             if result.get("status") == "ok":
                 return ("ok", str(file_path), result.get("outputPath") or out_path)
             return ("error", str(file_path), result.get("message", str(result)))
@@ -741,7 +748,19 @@ def main():
         if errors:
             print(f"{len(errors)} error(s):")
             for path, msg in errors:
-                print(f"  - {path}: {msg}")
+                # msg may be a full traceback; print the first line inline and
+                # write the complete detail to a log file next to the outputs.
+                first_line = str(msg).strip().splitlines()[-1] if str(msg).strip() else str(msg)
+                print(f"  - {path}: {first_line}")
+            _log_dir = Path(args.output) if args.output and Path(args.output).is_dir() else Path.cwd()
+            _fail_log = _log_dir / "batch_failures.log"
+            try:
+                with open(_fail_log, "w", encoding="utf-8") as _fh:
+                    for path, msg in errors:
+                        _fh.write(f"===== {path} =====\n{msg}\n\n")
+                print(f"Full failure tracebacks written to: {_fail_log}")
+            except Exception as _log_err:
+                print(f"(could not write failure log: {_log_err})")
         sys.exit(0 if not errors else 1)
 
     elif input_path.is_file():

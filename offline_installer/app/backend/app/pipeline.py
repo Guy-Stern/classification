@@ -506,20 +506,38 @@ def apply_v6_masks_to_classification(
     # no-mask.
     from . import shapefile_resolver, shapefile_config
 
-    water_cfg = water_mask or shapefile_config.get_water_mask()
+    try:
+        water_cfg = water_mask or shapefile_config.get_water_mask()
+    except Exception as exc:
+        print(f"[pipeline] water: get_water_mask failed "
+              f"({type(exc).__name__}: {exc}); no configured water mask")
+        water_cfg = water_mask
     if water_cfg and Path(water_cfg).exists():
         water_mask_path, water_source = water_cfg, "raster"
     else:
         if water_cfg:
             print(f"[pipeline] water: water_mask not found at {water_cfg!r}")
         water_mask_path, water_source = None, "disabled"
-    road_resolved = shapefile_resolver.resolve_shapefile(raster_path, "roads")
+    # Resolving SDE/shapefile features can fail per-tile (subprocess, reprojection
+    # at extreme bounds, missing connection). A failure here must NOT lose a tile
+    # whose KMeans classification already succeeded — degrade to SAM3/no-mask.
+    try:
+        road_resolved = shapefile_resolver.resolve_shapefile(raster_path, "roads")
+    except Exception as exc:
+        print(f"[pipeline] roads: resolve_shapefile failed "
+              f"({type(exc).__name__}: {exc}); falling back to SAM3/no-mask")
+        road_resolved = None
     road_mask_path, road_source = _acquire_mask(
         raster_path, "roads", road_resolved, sam3_enabled,
         progress_callback=_phase_cb("Roads (SAM3)"),
         mask_output_dir=mask_output_dir,
     )
-    bldg_resolved = shapefile_resolver.resolve_shapefile(raster_path, "buildings")
+    try:
+        bldg_resolved = shapefile_resolver.resolve_shapefile(raster_path, "buildings")
+    except Exception as exc:
+        print(f"[pipeline] buildings: resolve_shapefile failed "
+              f"({type(exc).__name__}: {exc}); falling back to SAM3/no-mask")
+        bldg_resolved = None
     bldg_mask_path, bldg_source = _acquire_mask(
         raster_path, "buildings", bldg_resolved, sam3_enabled,
         progress_callback=_phase_cb("Buildings (SAM3)"),
