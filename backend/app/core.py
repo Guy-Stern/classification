@@ -442,6 +442,13 @@ MAX_TRAIN_PIXELS = 100_000
 _MIN_TRAIN_PIXELS = 20_000
 _MAX_TRAIN_PIXELS = 120_000
 _PCA_PRESAMPLE    = 8_000    # tiny pre-sample for variance estimation
+# Pixels whose mean RGB is below this are treated as nodata/black border —
+# ortho mosaic edges are filled with RGB~0 that is NOT flagged as raster nodata.
+# Excluding them from KMeans training stops a black centroid from forming and
+# stealing a material slot (the batch shared-model "everything sand, no soil"
+# failure). 8 is well below any real kmeans-source material (asphalt/concrete
+# are mask-source; the darkest natural anchor, soil, is ~RGB(85,55,30)).
+NEAR_BLACK_RGB_MEAN = 8.0
 import math
 
 VECTOR_OVERLAY_COLOR = (255, 255, 0)
@@ -1236,6 +1243,20 @@ def _sample_raster_for_training(
             parts.append(_sample_window(src.read(window=win)))
 
     combined = np.concatenate(parts, axis=0)
+
+    # Drop near-black nodata/border pixels (RGB~0 mosaic edges) before training.
+    # The first three feature columns are the raw R,G,B bands. Without this, the
+    # large black-border population on mosaic tiles forms its own KMeans centroid
+    # and steals a material slot in the cluster->material assignment. Keep at
+    # least one pixel so an all-black window/tile doesn't yield an empty matrix.
+    if combined.shape[1] >= 3 and len(combined):
+        valid = combined[:, :3].mean(axis=1) >= NEAR_BLACK_RGB_MEAN
+        n_drop = int((~valid).sum())
+        if valid.any() and n_drop:
+            combined = combined[valid]
+            print(f"  [SAMPLE] dropped {n_drop:,} near-black px "
+                  f"(RGB-mean < {NEAR_BLACK_RGB_MEAN:g}) before training")
+
     n_total = len(combined)
     print(f"  [SAMPLE] {n_total:,} px from {grid_steps}×{grid_steps} grid "
           f"+ {n_random_extra} random windows (~{pixels_per_window} px/window)")
@@ -1505,6 +1526,35 @@ def _nearest_center_chunked(
 # ---------------------------------------------------------------------------
 
 
+def _near_black_validity_mask(source_bands: np.ndarray) -> Optional[np.ndarray]:
+    """Return a 2-D bool mask (True = near-black nodata/border) or None.
+
+    ``source_bands`` is the ORIGINAL raster array (bands, H, W) on the SAME grid
+    as the painted RGB output (i.e. before any reprojection). Ortho mosaic edges
+    are RGB~0 fill that is not flagged as raster nodata; we detect them by mean
+    RGB so they can be written as nodata instead of being painted a material.
+    """
+    if source_bands is None or source_bands.ndim != 3 or source_bands.shape[0] < 3:
+        return None
+    nb = source_bands[:3].astype(np.float32).mean(axis=0) < NEAR_BLACK_RGB_MEAN
+    return nb if nb.any() else None
+
+
+def _paint_near_black_nodata(rgb: np.ndarray, source_bands: np.ndarray) -> int:
+    """Zero out (nodata=0) painted pixels whose source RGB is near-black.
+
+    Operates in-place on ``rgb`` (3, H, W). Returns the number of pixels masked.
+    No MEA palette colour has a zero channel, so nodata=0 cannot collide with a
+    real material. Must be called BEFORE reprojection, while ``rgb`` and
+    ``source_bands`` share the same grid.
+    """
+    nb = _near_black_validity_mask(source_bands)
+    if nb is None or rgb is None:
+        return 0
+    rgb[:, nb] = 0
+    return int(nb.sum())
+
+
 def _classify_tile_worker(args: tuple) -> str:
     """Classify a single tile using a pre-trained global model.
 
@@ -1610,6 +1660,11 @@ def _classify_tile_worker(args: tuple) -> str:
 
     rgb = _apply_color_table(predicted_raster, color_table, verbose=False)
 
+    # Trim near-black mosaic-edge pixels to nodata instead of painting them a
+    # material (they would otherwise be classed as SOIL). Done on the original
+    # tile grid, before reprojection.
+    _paint_near_black_nodata(rgb, tile_data_crop)
+
     # Reproject to EPSG:4326 — GeoSpecific engine requirement.
     rgb, tile_transform, height, width, tile_crs = _reproject_to_wgs84(
         rgb, tile_transform, tile_crs, width, height,
@@ -1625,7 +1680,7 @@ def _classify_tile_worker(args: tuple) -> str:
     else:
         write_profile = _profile_for_driver(profile, driver)
         write_profile.update(count=3, dtype="uint8")
-    write_profile.update(height=height, width=width)
+    write_profile.update(height=height, width=width, nodata=0)
     with rasterio.open(output_path_obj, 'w', **write_profile) as dst:
         dst.write(rgb)
     del rgb, tile_data_crop, predicted_raster
@@ -2622,6 +2677,14 @@ def classify_and_export(
     # Apply colors
     rgb = _apply_color_table(predicted_raster, color_table)
 
+    # Trim near-black mosaic-edge pixels to nodata instead of painting them a
+    # material (they would otherwise be classed as SOIL). Done on the source
+    # grid, before reprojection.
+    if raster_data is not None:
+        _n_trim = _paint_near_black_nodata(rgb, raster_data)
+        if _n_trim:
+            print(f"  [OK] Trimmed {_n_trim:,} near-black border px to nodata")
+
     # Free large arrays before writing — only rgb is needed from here.
     del predicted_raster, raster_data
     gc.collect()
@@ -2641,7 +2704,8 @@ def classify_and_export(
     rgb_profile.update(
         count=3,
         dtype=np.uint8,
-        interleave='band'
+        interleave='band',
+        nodata=0,
     )
     # Use tiled writing for GeoTIFF so GDAL writes block-by-block, avoiding
     # the ~480 MB in-memory buffer limit on large rasters.
