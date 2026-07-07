@@ -411,26 +411,20 @@ print(f"[KMeans] engine={_ACCEL_ENGINE}  gpu={_ACCEL_GPU}  {_ACCEL_GPU_INFO if _
 
 
 def _make_kmeans(n_clusters: int, *, mini_batch: bool = True):
-    """Return the fastest available KMeans: faiss-gpu > faiss-cpu > cupy > cuML > sklearn."""
-    if _ACCEL_ENGINE == "faiss-gpu":
-        return _FaissKMeans(n_clusters, max_iter=80 if mini_batch else 300, use_gpu=True)
-    if _ACCEL_ENGINE == "faiss-cpu":
-        return _FaissKMeans(n_clusters, max_iter=80 if mini_batch else 300, use_gpu=False)
-    if _ACCEL_ENGINE == "cupy":
-        return _CupyKMeans(n_clusters, n_init=1,
-                           max_iter=80 if mini_batch else 300)
-    if _ACCEL_ENGINE == "cuml":
-        try:
-            if mini_batch:
-                from cuml.cluster import MiniBatchKMeans as _CuMBK
-                return _CuMBK(n_clusters=n_clusters, random_state=42,
-                               max_iter=80, batch_size=65536)
-            from cuml.cluster import KMeans as _CuKM
-            return _CuKM(n_clusters=n_clusters, random_state=42,
-                          n_init=10, max_iter=300)
-        except Exception as _e:
-            print(f"[KMeans] cuML failed ({_e}), falling back to sklearn")
-    # sklearn CPU
+    """Return a DETERMINISTIC sklearn KMeans (CPU) for reproducible cross-machine results.
+
+    The GPU engines (faiss-gpu/faiss-cpu/cupy/cuML) are intentionally bypassed for
+    the *model fit*: faiss is constructed with no seed and cupy's GPU float
+    reductions are non-associative, so identical training pixels yield DIFFERENT
+    centroids on different machines — and the GPU engines under-capture the
+    minority vegetation cluster.  In folder/batch runs this produced the
+    cross-machine "different result every run" symptom (sand/soil flips +
+    vegetation collapse — measured cupy 5.9% veg vs sklearn 23.9% on the same
+    tile).  Training is capped at MAX_TRAIN_PIXELS (~100k px), so sklearn is fast
+    here (~seconds) and yields identical, vegetation-faithful centroids on every
+    machine.  The GPU probe (_ACCEL_ENGINE) is still reported at import for
+    diagnostics; only the clustering model is pinned to CPU.
+    """
     if mini_batch:
         return MiniBatchKMeans(n_clusters=n_clusters, random_state=42,
                                n_init=1, max_iter=80, batch_size=65536)
@@ -2388,7 +2382,7 @@ def classify_and_export(
         kmeans.fit(train_norm)
         del train_norm, train_px
         gc.collect()
-        print(f"  [OK] KMeans fitted [{_ACCEL_ENGINE}] on {len(pixel_features):,} pixels")
+        print(f"  [OK] KMeans fitted [sklearn, deterministic] on {len(pixel_features):,} pixels")
 
     mea_mapping: List[Dict[str, object]] | None = None
     scene_mea_prior: Dict[str, float] | None = None

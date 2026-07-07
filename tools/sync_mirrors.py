@@ -41,6 +41,19 @@ SYNC_PAIRS: List[Tuple[str, List[str]]] = [
     ("backend/app/pipeline.py", [
         "offline_installer/app/backend/app/pipeline.py",
     ]),
+    # Layered-priority geocell manifest input (mosaic pre-stage in front of classify_v6)
+    ("backend/app/geocell.py", [
+        "offline_installer/app/backend/app/geocell.py",
+    ]),
+    ("backend/app/manifest.py", [
+        "offline_installer/app/backend/app/manifest.py",
+    ]),
+    ("backend/app/mosaic_catalog.py", [
+        "offline_installer/app/backend/app/mosaic_catalog.py",
+    ]),
+    ("backend/app/mosaic_builder.py", [
+        "offline_installer/app/backend/app/mosaic_builder.py",
+    ]),
     ("backend/app/shapefile_config.py", [
         "offline_installer/app/backend/app/shapefile_config.py",
     ]),

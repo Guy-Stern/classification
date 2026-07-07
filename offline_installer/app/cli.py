@@ -162,6 +162,50 @@ Examples:
 
     # MEA, KMeans-only (no SAM3, no SDE — roads/buildings/water empty):
     python cli.py photo.tif out.tif --no-sam3
+
+LAYERED-PRIORITY GEOCELL MODE (--manifest)
+────────────────────────────────────────────────────────────────────────
+Instead of a batch of independent tiffs, describe ONE CDB geocell and
+LAYERS of source orthos in a TOML manifest. The layers are composited into
+a single EPSG:4326 mosaic for that geocell (highest priority wins per
+pixel, lower layers fill underneath), then classified with the 6-material
+MEA pipeline. Output = one classified GeoTIFF + MEA XML for the geocell —
+ready to drop into a CDB build as raster_material.
+
+    python cli.py --manifest geocell.toml
+
+Manifest schema (geocell.toml):
+
+    [geocell]
+    south_lat = 45          # integer S edge; west_lon must be a multiple of
+    west_lon  = 6           # the CDB lat-zone width (1° for |lat|<50, 2° 50-70,
+                            # 4° 70-75, 6° 75-80, 12° >=80). Names the cell N45E006.
+
+    [[layers]]
+    folder   = "D:/orthos/2024_campaign"
+    priority = 1            # 1 = highest, wins on overlap
+    glob     = "**/*.tif"   # optional (default shown)
+    name     = "2024"       # optional, logging only
+
+    [[layers]]
+    folder   = "D:/orthos/archive_2019"
+    priority = 2
+
+    # sources = ["D:/orthos/one_off.tif"]   # optional flat files, below all layers
+
+    [output]
+    path      = "D:/cdb_out/N45E006_material.tif"   # .xml written beside it
+    overwrite = false
+
+Notes:
+  - Reprojects every layer to EPSG:4326 and samples at the FINEST covering
+    layer's resolution (auto). A cell that would exceed ~20000 px/side is
+    coarsened with a warning rather than exploding.
+  - Files not touching the geocell are dropped before compositing.
+  - SAM3 / SDE (roads, buildings) / water_mask are applied to the mosaic
+    using shapefile_config.json — the manifest carries only geocell +
+    layers + output.
+  - --manifest cannot be combined with INPUT/OUTPUT/--input/--output/--classes.
 """
 
 import argparse
@@ -366,6 +410,104 @@ def derive_output(input_path: Path, output_arg: str, suffix: str, input_root: Pa
     return str(input_path.parent / (input_path.stem + suffix + ".tif"))
 
 
+def run_manifest(manifest_path: str):
+    """Layered-priority geocell run driven by a TOML manifest.
+
+    Parses the manifest, composites its priority layers of source orthos into a
+    single EPSG:4326 mosaic for the manifest's CDB geocell (highest priority
+    wins per pixel), then classifies that mosaic with the 6-material MEA
+    pipeline (``classify_v6``) — SAM3 / SDE / water-mask config is read from
+    ``shapefile_config.json`` exactly as in the positional form. Output is a
+    single classified GeoTIFF + MEA XML at the manifest's ``[output]`` path.
+    """
+    # Light deps (rasterio/pydantic/tomllib) up front; the torch-heavy classify
+    # imports (core, pipeline) are deferred until after the mosaic is built so a
+    # bad manifest/mosaic fails fast without paying the model-import cost.
+    from backend.app.manifest import load_manifest
+    from backend.app.mosaic_catalog import build_catalog, summary_by_priority
+    from backend.app.mosaic_builder import build_mosaic
+
+    try:
+        manifest = load_manifest(manifest_path)
+        geocell = manifest.geocell.to_geocell()   # validates zone-width snap
+    except Exception as e:
+        print(f"FAIL: invalid manifest {manifest_path}: {e}")
+        sys.exit(1)
+
+    bounds = geocell.bounds_wgs84()
+    out_path = Path(manifest.output.path)
+    print("=" * 70)
+    print(f"[cli] geocell manifest run: {geocell.name}")
+    print(f"      bounds (W,S,E,N):   {tuple(round(b, 4) for b in bounds)}")
+    print(f"      output:             {out_path}")
+    print("=" * 70)
+
+    if out_path.exists() and not manifest.output.overwrite:
+        print(f"FAIL: output already exists (set [output] overwrite = true to replace): {out_path}")
+        sys.exit(1)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Build the priority mosaic for the geocell ─────────────────────────────
+    try:
+        entries = build_catalog(manifest.layers, manifest.sources, bounds)
+    except Exception as e:
+        print(f"FAIL: catalog build failed: {e}")
+        sys.exit(1)
+    if not entries:
+        print(f"FAIL: no source intersects geocell {geocell.name} {tuple(round(b, 4) for b in bounds)}.\n"
+              f"      Check the layer folders/globs and the [geocell] coordinates.")
+        sys.exit(1)
+    for prio, count, bbox in summary_by_priority(entries):
+        print(f"  priority={prio}: {count} file(s), bbox "
+              f"(W={bbox[0]:.4f} S={bbox[1]:.4f} E={bbox[2]:.4f} N={bbox[3]:.4f})")
+
+    # PID in the name so concurrent runs (scheduler / CI double-trigger, or a
+    # re-run while a prior run is still classifying) can't collide on the temp.
+    tmp_mosaic = out_path.parent / f".{geocell.name}_{os.getpid()}_mosaic.tmp.tif"
+    try:
+        try:
+            info = build_mosaic(entries, bounds, tmp_mosaic)
+        except Exception as e:
+            print(f"FAIL: mosaic build failed: {e}")
+            sys.exit(1)
+        print(f"[cli] mosaic: {info['n_sources']} source(s) -> "
+              f"{info['width']}x{info['height']} px @ {info['gsd_deg']:.3e} deg/px; "
+              f"{info['missing_fraction'] * 100:.1f}% of the cell uncovered (black fill)")
+
+        # Classify the mosaic as one image. Same MEA defaults as the positional
+        # form; classify_v6 does its own RAM-aware internal tiling for big cells.
+        from backend.app.core import MEA_CLASSES
+        from backend.app.pipeline import classify_v6
+        result = classify_v6(
+            raster_path=str(tmp_mosaic),
+            classes=MEA_CLASSES,
+            smoothing="none",
+            feature_flags={"spectral": True, "texture": True, "indices": False},
+            output_path=str(out_path),
+            sam3_enabled=True,
+            water_mask=None,
+            single_fused_output=True,
+            tile_mode=False,
+            tile_max_pixels=512 ** 2,
+            tile_overlap=0,
+            tile_output_dir=None,
+            tile_workers=max(1, os.cpu_count() or 1),
+            detect_shadows=False,
+            max_threads=None,
+        )
+    finally:
+        try:
+            tmp_mosaic.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if result.get("status") == "ok":
+        print(f"OK Saved: {result.get('outputPath') or out_path}")
+        sys.exit(0)
+    print(f"FAIL: {result.get('message', str(result))}")
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cli.py",
@@ -407,6 +549,18 @@ def main():
         "--examples", "-e",
         action="store_true",
         help="Show full guide with parameter explanations and examples.",
+    )
+
+    # ── Layered-priority geocell mode (TOML manifest) ─────────────────────────
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        metavar="PATH",
+        help="Run in layered-priority geocell mode from a TOML manifest.\n"
+             "Composites priority layers of orthos into one EPSG:4326 mosaic for\n"
+             "the manifest's CDB geocell, then runs the 6-material MEA pipeline.\n"
+             "Mutually exclusive with INPUT/OUTPUT/--input/--output/--classes.\n"
+             "See --examples for the manifest schema.",
     )
 
     # ── Required-ish (one of: positional INPUT, --input, or --examples) ───────
@@ -578,6 +732,17 @@ def main():
         print(EXAMPLES_TEXT)
         sys.exit(0)
 
+    # ── Layered-priority geocell mode (TOML manifest) ─────────────────────────
+    # Dispatch early: the manifest fully describes the run, so it can't be
+    # combined with the positional/flag input forms.
+    if args.manifest is not None:
+        if any([args.input_pos, args.output_pos, args.input, args.output,
+                args.classes is not None]):
+            parser.error("--manifest cannot be combined with INPUT/OUTPUT/"
+                         "--input/--output/--classes.")
+        run_manifest(args.manifest)
+        return  # defensive: run_manifest calls sys.exit()
+
     # ── Reconcile positional vs flag forms ─────────────────────────────────────
     # The simple form is `cli.py <input> <output>`. Positionals live in
     # args.input_pos / args.output_pos; flag form lives in args.input /
@@ -653,54 +818,19 @@ def main():
         image_workers = max(1, int(image_workers))
         print(f"Found {len(files)} file(s) to process. image_workers={image_workers}")
 
+        # Folder batch classifies each tile INDEPENDENTLY (per-tile KMeans),
+        # exactly like the proven single-file path. We deliberately do NOT train
+        # one shared folder-pooled KMeans: pooling biased the 3 cluster centroids
+        # toward the folder's sand/soil-dominant colors (starving vegetation of a
+        # centroid -> folder-wide veg collapse) and was engine-nondeterministic
+        # (faiss-GPU vs sklearn-CPU centroids landed mid-tan pixels on opposite
+        # sides of the SAND/SOIL brightness gate -> per-machine SAND<->SOIL flips).
+        # Per-tile centroids represent each tile's own colors, so every tile
+        # matches its single-file output. The pretrained_* args below stay None.
         shared_scaler = None
         shared_kmeans = None
         shared_color_table = None
         shared_mea_mapping = None
-
-        # For folder batch in step1/full, train ONE shared model and ONE shared
-        # color table for full cross-image consistency (same cluster->material mapping).
-        if args.step in {"step1", "full"}:
-            try:
-                from backend.app.core import train_kmeans_model, build_shared_color_table
-                feature_flags = {
-                    "spectral": not args.no_spectral,
-                    "texture": not args.no_texture,
-                    "indices": args.indices,
-                }
-                # MEA mode: train on the 3 kmeans-source materials only
-                # (BM_VEGETATION/BM_SAND/BM_SOIL). BM_ASPHALT/BM_CONCRETE/
-                # BM_WATER are mask-source — classify_v6 paints them per
-                # raster from SAM3 / shapefiles. Mirrors /classify-batch.
-                if args.mea:
-                    from backend.app.pipeline import _split_classes_by_source
-                    train_classes, _ = _split_classes_by_source(classes)
-                    print(f"[Batch] MEA mode: shared model trained on "
-                          f"{len(train_classes)}/{len(classes)} kmeans-source "
-                          f"classes ({[c['name'] for c in train_classes]}); "
-                          f"BM_ASPHALT/BM_CONCRETE/BM_WATER painted per-raster.")
-                else:
-                    train_classes = classes
-
-                print(f"[Batch] Training shared model on {len(files)} raster(s)...")
-                shared_scaler, shared_kmeans = train_kmeans_model(
-                    [str(p) for p in files],
-                    train_classes,
-                    feature_flags,
-                    detect_shadows=args.detect_shadows,
-                )
-                print("[Batch] Building shared color table...")
-                shared_mea_mapping, shared_color_table = build_shared_color_table(
-                    [str(p) for p in files],
-                    shared_scaler,
-                    shared_kmeans,
-                    train_classes,
-                    feature_flags,
-                )
-                print("[Batch] Shared model ready; applying to all files.")
-            except Exception as e:
-                print(f"[Batch][warn] Shared-model training failed, using per-image fallback: {e}")
-                shared_scaler = shared_kmeans = shared_color_table = shared_mea_mapping = None
 
         def _process_file(file_path: Path):
             out_path = derive_output(file_path, args.output, suffix, input_root=input_path)

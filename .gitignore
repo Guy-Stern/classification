@@ -44,3 +44,4 @@ publishes/
 *.gpkg
 shapefile_config.json
 .recovery/
+/ForEzrahi
