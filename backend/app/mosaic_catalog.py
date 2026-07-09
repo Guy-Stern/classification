@@ -22,6 +22,11 @@ Halt-on-first-error (per CLAUDE.md): a source with no CRS, an unreadable
 header, or a layer whose glob matches zero files aborts the run with the
 offending path attached — not a silent smaller mosaic.
 
+JPEG 2000 (``.jp2``) sources are read through the same rasterio/GDAL path as
+GeoTIFFs — footprint here, pixels in ``mosaic_builder`` — so no format-specific
+code path exists. They require a GDAL JP2 driver (JP2OpenJPEG on the standard
+build); a ``.jp2`` GDAL cannot open fails loudly here with its path attached.
+
 No numpy import; needs only ``rasterio`` (for the header read + reprojection),
 so it imports under the geo-only interpreter used for unit tests.
 """
@@ -104,11 +109,20 @@ def _bbox_intersects(
 
 
 def _discover(layer: LayerConfig) -> list[Path]:
-    matches = sorted(layer.folder.glob(layer.glob))
+    """Files under ``layer.folder`` matching any of the layer's glob pattern(s).
+
+    A layer's default glob covers TIFF + JPEG 2000, so one call can return a mix
+    of ``.tif`` / ``.tiff`` / ``.jp2``. Matches from all patterns are unioned
+    (a file that matches two patterns appears once) and sorted for a
+    deterministic, path-tie-break composite order.
+    """
+    patterns = layer.glob_patterns()
+    matches = sorted({p for pat in patterns for p in layer.folder.glob(pat)})
     if not matches:
+        shown = patterns[0] if len(patterns) == 1 else patterns
         raise ValueError(
             f"layer priority={layer.priority} folder={layer.folder} "
-            f"glob={layer.glob!r} matched no files"
+            f"glob={shown!r} matched no files"
         )
     return matches
 

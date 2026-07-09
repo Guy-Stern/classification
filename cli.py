@@ -184,12 +184,13 @@ Manifest schema (geocell.toml):
     [[layers]]
     folder   = "D:/orthos/2024_campaign"
     priority = 1            # 1 = highest, wins on overlap
-    glob     = "**/*.tif"   # optional (default shown)
+    glob     = "**/*.tif"   # optional; default picks up *.tif/*.tiff/*.jp2.
+                            #   May be a list: ["**/*.tif", "**/*.jp2"]
     name     = "2024"       # optional, logging only
 
     [[layers]]
-    folder   = "D:/orthos/archive_2019"
-    priority = 2
+    folder   = "D:/orthos/archive_2019_jp2"   # a JPEG-2000 layer, e.g.
+    priority = 2                               # composited under the 2024 tiffs
 
     # sources = ["D:/orthos/one_off.tif"]   # optional flat files, below all layers
 
@@ -198,6 +199,8 @@ Manifest schema (geocell.toml):
     overwrite = false
 
 Notes:
+  - Layers may be GeoTIFF or JPEG 2000 (.jp2); each layer's default glob picks
+    up .tif/.tiff/.jp2, so different layers can mix formats in one manifest.
   - Reprojects every layer to EPSG:4326 and samples at the FINEST covering
     layer's resolution (auto). A cell that would exceed ~20000 px/side is
     coarsened with a warning rather than exploding.

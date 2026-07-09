@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from app.manifest import load_manifest, GeocellManifest  # noqa: E402
+from app.manifest import DEFAULT_LAYER_GLOBS, load_manifest, GeocellManifest  # noqa: E402
 
 
 def _write(td, text):
@@ -44,7 +44,10 @@ def test_valid_manifest_parses():
     assert isinstance(m, GeocellManifest)
     assert m.geocell.south_lat == 45 and m.geocell.west_lon == 6
     assert [l.priority for l in m.layers] == [1, 2]
-    assert m.layers[0].glob == "**/*.tif"          # default applied
+    # Default glob covers TIFF + JPEG 2000 so a layer of either format is picked
+    # up without configuration.
+    assert m.layers[0].glob == list(DEFAULT_LAYER_GLOBS)
+    assert m.layers[0].glob_patterns() == ["**/*.tif", "**/*.tiff", "**/*.jp2"]
     assert m.layers[0].name == "hi"
     assert m.output.overwrite is False             # default
     assert m.parallelism.workers == "auto"         # default
@@ -145,6 +148,38 @@ def test_absolute_paths_pass_through_unchanged():
         m = load_manifest(_write(td, VALID))
     # VALID uses drive-absolute paths (D:/...) — anchoring must leave them alone.
     assert str(m.layers[0].folder).replace("\\", "/") == "D:/orthos/hi_res"
+
+
+def test_string_glob_narrows_layer_to_one_format():
+    # A single-string glob (e.g. a JP2-only layer) still validates and normalizes
+    # to a one-item pattern list.
+    text = VALID.replace('priority = 1\nname     = "hi"',
+                         'priority = 1\nglob     = "**/*.jp2"')
+    with tempfile.TemporaryDirectory() as td:
+        m = load_manifest(_write(td, text))
+    assert m.layers[0].glob == "**/*.jp2"
+    assert m.layers[0].glob_patterns() == ["**/*.jp2"]
+
+
+def test_list_glob_accepts_multiple_patterns():
+    # Mixed-format layer via an explicit list.
+    text = VALID.replace('priority = 1\nname     = "hi"',
+                         'priority = 1\nglob     = ["**/*.tif", "**/*.jp2"]')
+    with tempfile.TemporaryDirectory() as td:
+        m = load_manifest(_write(td, text))
+    assert m.layers[0].glob == ["**/*.tif", "**/*.jp2"]
+    assert m.layers[0].glob_patterns() == ["**/*.tif", "**/*.jp2"]
+
+
+def test_empty_glob_list_rejected():
+    bad = VALID.replace('priority = 1\nname     = "hi"',
+                        'priority = 1\nglob     = []')
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            load_manifest(_write(td, bad))
+        except Exception:
+            return
+    raise AssertionError("expected a validation error for an empty glob list")
 
 
 if __name__ == "__main__":
