@@ -385,6 +385,12 @@ if exist "installer_assets\sam3_runtime" (
     echo    sam3_runtime\ assets placed at project root.
 )
 
+if exist "installer_assets\examples" (
+    if not exist "examples" mkdir "examples" >nul 2>&1
+    xcopy /e /i /y /q "installer_assets\examples" "examples\" >nul
+    echo    examples\ usage examples placed at project root.
+)
+
 (
 echo Classification Web App — Offline Installer Package
 echo ==================================================

@@ -3,7 +3,8 @@
 
 One TOML file = one CDB geocell = one ``classify_v6`` run. The manifest
 describes *where the input imagery comes from* (priority layers of source
-TIFFs) and *where the classified output goes* — nothing else. SAM3 / SDE /
+orthos — GeoTIFF and/or JPEG 2000) and *where the classified output goes* —
+nothing else. SAM3 / SDE /
 water-mask configuration deliberately stays in ``shapefile_config.json``; a
 stray ``[sde]`` or ``[water]`` table here is rejected (``extra="forbid"``).
 
@@ -16,7 +17,8 @@ Schema (see ``docs`` / ``cli.py --examples`` for the annotated version)::
     [[layers]]
     folder   = "D:/orthos/2024_campaign"
     priority = 1            # 1 = highest, wins on overlap
-    glob     = "**/*.tif"   # optional
+    glob     = "**/*.tif"   # optional; default matches *.tif/*.tiff/*.jp2.
+                            #   May be a list, e.g. ["**/*.tif", "**/*.jp2"].
     name     = "2024"       # optional, logging only
 
     [[layers]]
@@ -33,6 +35,11 @@ Priority direction matches QGIS / Photoshop layer ordering: **lower number =
 on top**. ``sources`` (flat files) always composite *below* every ``[[layers]]``
 entry — they occupy the lowest priority band.
 
+Each layer discovers **GeoTIFF and JPEG 2000** by default (``*.tif``, ``*.tiff``,
+``*.jp2``); different layers may mix formats freely (e.g. a ``.jp2`` layer on top
+of a ``.tif`` layer, both prioritized in the same manifest). Narrow a layer to
+one format by setting its ``glob`` to a single pattern or an explicit list.
+
 Pure stdlib ``tomllib`` + ``pydantic`` — no rasterio import, so it validates
 without the geo stack.
 """
@@ -44,11 +51,18 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .geocell import GeoCell
 
 _GLOB_CHARS = frozenset("*?[")
+
+# Default per-layer discovery patterns: GeoTIFF (both spellings) + JP2-boxed
+# JPEG 2000. A layer picks up all three unless it overrides ``glob``. On the
+# Windows target these match case-insensitively (``.TIF`` / ``.JP2`` too);
+# raw ``.j2k`` / ``.jpc`` codestreams are intentionally excluded — they can't
+# carry a CRS, so the catalog would reject them anyway.
+DEFAULT_LAYER_GLOBS = ("**/*.tif", "**/*.tiff", "**/*.jp2")
 
 
 def _expand_source_paths(raw_paths: list[Path]) -> list[Path]:
@@ -94,8 +108,25 @@ class LayerConfig(BaseModel):
 
     folder: Path
     priority: Annotated[int, Field(ge=1)]
-    glob: str = "**/*.tif"
+    # One pattern or a list of patterns. Default discovers TIFF + JPEG 2000 so a
+    # layer folder of either format (or a mix) is picked up without configuration.
+    glob: str | list[str] = Field(default_factory=lambda: list(DEFAULT_LAYER_GLOBS))
     name: str | None = None
+
+    @field_validator("glob")
+    @classmethod
+    def _reject_empty_glob(cls, v: str | list[str]) -> str | list[str]:
+        patterns = [v] if isinstance(v, str) else list(v)
+        if not patterns:
+            raise ValueError("glob must not be an empty list; give at least one pattern")
+        for pat in patterns:
+            if not isinstance(pat, str) or not pat.strip():
+                raise ValueError(f"glob pattern must be a non-empty string, got {pat!r}")
+        return v
+
+    def glob_patterns(self) -> list[str]:
+        """Normalize ``glob`` to a list of patterns (a lone string → one-item list)."""
+        return [self.glob] if isinstance(self.glob, str) else list(self.glob)
 
 
 class OutputConfig(BaseModel):
@@ -189,6 +220,7 @@ def load_manifest(path: str | Path) -> GeocellManifest:
 
 
 __all__ = [
+    "DEFAULT_LAYER_GLOBS",
     "GeoCellConfig",
     "LayerConfig",
     "OutputConfig",

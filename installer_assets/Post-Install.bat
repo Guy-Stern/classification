@@ -55,6 +55,16 @@ for %%F in (cli.py cli_launcher.py sde_conn_test.py ClassificationWebApp.exe Mat
     )
 )
 
+:: ── [1b/3] Copy usage examples (USE_CASES.txt + geocell template) ──────
+echo.
+echo [1b/3] Copying usage examples...
+if exist "%~dp0examples" (
+    xcopy /e /i /y /q "%~dp0examples" "%INSTALL_DIR%\examples\" >nul
+    echo   copied  examples\  - see examples\USE_CASES.txt
+) else (
+    echo   NOTE: examples\ folder not found next to this script - skipping.
+)
+
 :: ── [2/3] Install AI deps the wrapper missed ──────────────────────────
 :: torch + torchvision come from offline_packages_torch (cu121 wheels —
 :: they work fine on the A4000's CUDA 12.4 driver via forward-compat).
@@ -148,6 +158,10 @@ echo ======================================================================
 echo.
 echo Try the CLI:
 echo   "%INSTALL_DIR%\MaterialClassification_CLI.exe" --examples
+echo.
+echo Usage examples and a ready-to-edit manifest template:
+echo   "%INSTALL_DIR%\examples\USE_CASES.txt"
+echo   "%INSTALL_DIR%\examples\geocell.example.toml"
 echo.
 echo Configure SDE / shapefile paths - edit the "sde" block:
 echo   notepad "%INSTALL_DIR%\shapefile_config.json"

@@ -1,0 +1,29 @@
+# Runnable demo manifest — layered JPEG 2000 + GeoTIFF (Case 4).
+# Uses the small sample crops shipped next to this file (real N33E035
+# imagery, downsampled so the demo classifies in about a minute).
+#
+# Run it from the install folder:
+#     MaterialClassification_CLI.exe --manifest "examples\sample_data\geocell.toml"
+# or just double-click  run_demo.bat  in this folder.
+#
+# What it demonstrates: the JP2 layer (priority 1) composites ON TOP of the
+# GeoTIFF layer (priority 2) where they overlap; the two are mosaicked into
+# one EPSG:4326 raster for geocell N33E035 and classified into 6 materials.
+
+[geocell]
+south_lat = 33
+west_lon  = 35
+
+[[layers]]
+folder   = "upper_jp2"    # JPEG 2000 layer — on top (wins the overlap)
+priority = 1
+name     = "upper_jp2"
+
+[[layers]]
+folder   = "lower_tif"    # GeoTIFF layer — underneath
+priority = 2
+name     = "lower_tif"
+
+[output]
+path      = "out/demo_material.tif"
+overwrite = true

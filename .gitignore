@@ -45,3 +45,9 @@ publishes/
 shapefile_config.json
 .recovery/
 /ForEzrahi
+
+# Assembled installer publishes (build output)
+Publishes/
+
+# HF weights auto-downloaded at runtime (not committed)
+models/hf_cache/

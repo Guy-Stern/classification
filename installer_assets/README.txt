@@ -2,29 +2,44 @@ Classification Web App + CLI — Offline Installer
 ==================================================
 
 THIS INSTALLER IS 100% OFFLINE. No internet connection is needed
-on the target machine at any point. Every Python wheel, every model
-weight, every binary is bundled inside this folder.
+on the target machine at any point. Every Python wheel and binary
+is bundled inside this folder.
+
+  WHAT THIS BUILD INCLUDES: 6-material classification, the layered
+  JPEG-2000 / GeoTIFF geocell manifest (--manifest), and GPU KMeans
+  (PyTorch cu121 + CUDA 12.4 wheels).
+  WHAT IT DOES NOT INCLUDE: the multi-GB SAM3 AI model weights and the
+  sam3 / segment-geospatial packages, so SAM3 road/building extraction
+  is DISABLED until you add them. Everything else (KMeans, shapefile /
+  SDE masks, the --manifest mode) works exactly as shipped.
 
 Layout
 ------
   ClassificationInstaller.exe   The install wizard (folder picker,
                                 installs Python + base packages).
   Post-Install.bat              Patcher — copies CLI files the wizard
-                                misses + installs the AI deps (torch,
-                                sam3, timm, segment-geospatial,
-                                triton-windows) from the bundled wheel
-                                cache + drops the SAM3 BPE tokenizer
-                                asset. ALL FROM LOCAL WHEELS — no
-                                network calls.
+                                misses + installs torch / torchvision
+                                (cu121) from the bundled wheel cache +
+                                copies the examples\ folder + drops a
+                                shapefile_config.json template. ALL FROM
+                                LOCAL WHEELS — no network calls. (It also
+                                tries sam3 / timm, which this build does
+                                not bundle; that step is skipped.)
   README.txt                    This file.
+  examples\                     Usage examples for common user cases
+                                (USE_CASES.txt) + a ready-to-edit geocell
+                                manifest template (geocell.example.toml).
+                                Post-Install.bat copies these into the
+                                install folder under examples\.
 
-  offline_installer\            All install payload (~16 GB):
+  offline_installer\            All install payload (~5.6 GB):
     Setup.bat / Setup.ps1       Direct-install fallback (use if the
                                 wrapper exe doesn't work).
     prerequisites\              Embedded Python 3.11.9 + get-pip.py.
     offline_packages\           Core pip wheels (FastAPI, rasterio,
-                                geopandas, sam3, timm, segment-
-                                geospatial, triton-windows, ~140 wheels).
+                                geopandas, ...) + PyTorch cu121, ~84
+                                wheels. Does NOT include sam3 / timm /
+                                segment-geospatial in this build.
     offline_packages_torch\     PyTorch 2.5.1+cu121 (2.3 GB) +
                                 torchvision 0.20.1+cu121 + deps.
     offline_packages_gpu\       CuPy + NVIDIA CUDA runtime libs (for
@@ -35,9 +50,11 @@ Layout
       backend\, web_app\dist\         App code + frontend bundle.
       mea_calibration_tool\, shared\
       models\
-        sam3\sam3.1_multiplex.pt      3.3 GB — SAM 3.1 (preferred).
-        sam3\sam3.pt                  3.3 GB — SAM 3.0 (fallback).
-        hf_cache\hub\                 5 GB  — OWLv2 + SAM2 + bert.
+        sam3\                         Tokenizer + config JSONs only. The
+                                      SAM3 weights (sam3.pt /
+                                      sam3.1_multiplex.pt, multi-GB) are
+                                      NOT bundled in this build.
+        hf_cache\hub\                 Model config JSONs (no weights).
 
   sam3_runtime\                 SAM3 BPE tokenizer asset that the
                                 pip-installed sam3 wheel doesn't ship
@@ -52,16 +69,18 @@ Two-step install on the air-gapped target
      - Folder picker: select the  offline_installer  folder.
      - Pick an install dir (default: C:\ClassificationApp).
      - Wizard installs Python + base packages from offline_packages\,
-       copies app\, copies model weights, writes start.bat shortcuts.
+       copies app\ and writes start.bat shortcuts. (No SAM3 AI model
+       weights are bundled in this build.)
 
   2. Double-click  Post-Install.bat
      - Press Enter to accept the install dir from step 1.
      - Patcher copies cli.py / cli_launcher.py / the two .exe files
        (the wrapper from step 1 doesn't know about them — it predates
        this branch's CLI feature).
-     - pip-installs torch + torchvision + sam3 + timm +
-       segment-geospatial + triton-windows from offline_packages*\ —
-       --no-index flag means pip CANNOT touch the internet.
+     - pip-installs torch + torchvision (CUDA 12.1) from
+       offline_packages*\ — --no-index means pip CANNOT touch the
+       internet. (sam3 / timm / segment-geospatial are NOT bundled in
+       this build, so that part is skipped — SAM3 extraction stays off.)
      - Drops the SAM3 BPE tokenizer asset into the venv.
      - Drops a shapefile_config.json template at the install root.
 

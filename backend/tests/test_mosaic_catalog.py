@@ -76,6 +76,29 @@ def test_geocell_prefilter_drops_nonintersecting():
     assert names == ["in.tif"], names
 
 
+def test_discover_default_glob_picks_up_tiff_and_jp2():
+    # Discovery only (mc._discover) so it runs without a GDAL JP2 driver — no
+    # pixels are read. The default glob must union .tif/.tiff/.jp2 and skip
+    # non-raster files; each match appears once even on a case-insensitive FS.
+    with tempfile.TemporaryDirectory() as td:
+        lay = Path(td) / "mixed"; lay.mkdir()
+        for name in ("a.tif", "b.tiff", "c.jp2", "skip.png", "notes.txt"):
+            (lay / name).write_bytes(b"")
+        layer = LayerConfig(folder=lay, priority=1)   # default glob
+        found = sorted(p.name for p in mc._discover(layer))
+    assert found == ["a.tif", "b.tiff", "c.jp2"], found
+
+
+def test_discover_string_glob_restricts_to_one_format():
+    with tempfile.TemporaryDirectory() as td:
+        lay = Path(td) / "jp2only"; lay.mkdir()
+        for name in ("a.tif", "c.jp2", "d.jp2"):
+            (lay / name).write_bytes(b"")
+        layer = LayerConfig(folder=lay, priority=1, glob="**/*.jp2")
+        found = sorted(p.name for p in mc._discover(layer))
+    assert found == ["c.jp2", "d.jp2"], found
+
+
 def test_priority_one_is_last_in_composite_order():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / "base"; base.mkdir()

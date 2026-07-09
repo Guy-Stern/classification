@@ -1,0 +1,89 @@
+============================================================================
+ Material Classification - Common User Cases
+============================================================================
+
+These are the everyday ways to run the tool. Commands use the CLI exe that
+was installed to your install folder (default C:\ClassificationApp). Either
+open a command prompt in that folder, or put the full path to the exe.
+
+Full built-in reference at any time:
+    MaterialClassification_CLI.exe --examples
+
+The classifier produces 6 materials:
+  KMeans (colour-clustered):  vegetation, sand, soil
+  Mask-based (SAM3/shapefile): asphalt, concrete, water
+Every run also writes a <name>.xml composite-material table next to the output.
+
+
+----------------------------------------------------------------------------
+ CASE 1 - Classify a single orthophoto  (simplest)
+----------------------------------------------------------------------------
+    MaterialClassification_CLI.exe "C:\data\ortho.tif" "C:\out\ortho_classified.tif"
+
+  - Runs the 6-material MEA pipeline (SAM3 + shapefiles auto-enabled).
+  - Input can be .tif / .tiff / .jpg / .jpeg.
+  - Writes the classified GeoTIFF + a matching .xml.
+
+
+----------------------------------------------------------------------------
+ CASE 2 - Classify a whole folder  (batch)
+----------------------------------------------------------------------------
+    MaterialClassification_CLI.exe "C:\data\orthos\" "C:\out\"
+
+  - Every supported raster in the folder is classified.
+  - A single shared KMeans model is trained across the batch for consistent
+    colours from tile to tile.
+
+
+----------------------------------------------------------------------------
+ CASE 3 - Fast KMeans-only  (no AI, no model weights needed)
+----------------------------------------------------------------------------
+    MaterialClassification_CLI.exe -i "C:\data\ortho.tif" -o "C:\out\ortho.tif" --mea --no-sam3
+
+  - Skips SAM3 road/building extraction; classifies by colour only
+    (vegetation / sand / soil, plus water/asphalt/concrete from shapefiles
+    if configured).
+  - Use this when SAM3 model weights are not installed, or for a quick pass.
+
+
+----------------------------------------------------------------------------
+ CASE 4 - Layered geocell manifest  (combine JPEG 2000 + GeoTIFF layers)
+----------------------------------------------------------------------------
+    MaterialClassification_CLI.exe --manifest "C:\data\geocell.toml"
+
+  - Describe ONE CDB geocell and prioritized LAYERS of source orthophotos in
+    a small TOML file. Layers may be GeoTIFF and/or JPEG 2000 (.jp2) - each
+    layer auto-discovers *.tif / *.tiff / *.jp2, so different-format layers
+    can be mixed and prioritized in one manifest.
+  - The layers are composited into one EPSG:4326 mosaic (lower priority
+    number = on top, wins on overlap), then the mosaic is classified.
+  - TRY IT NOW (no editing needed): double-click
+        sample_data\run_demo.bat
+    It runs this exact command on a small bundled sample (real N33E035
+    imagery, a JPEG 2000 layer over a GeoTIFF layer) and writes
+    sample_data\out\demo_material.tif + .xml in about a minute.
+  - See the ready-to-edit template:  geocell.example.toml  (in this folder).
+
+
+----------------------------------------------------------------------------
+ CASE 5 - Buildings / roads / water from shapefiles or SDE
+----------------------------------------------------------------------------
+  1. Edit  shapefile_config.json  in your install folder (a filled-in
+     reference is provided as  shapefile_config.example.json ).
+  2. Run any classification (Case 1, 2, or 4) - the building/road/water masks
+     are applied automatically; no extra flags needed.
+
+  Test an SDE connection first:
+    .venv\Scripts\python.exe sde_conn_test.py
+
+
+----------------------------------------------------------------------------
+ CASE 6 - Web app (point-and-click GUI)
+----------------------------------------------------------------------------
+    Double-click  start.bat  in the install folder, then open:
+        http://127.0.0.1:8000
+
+  - Same engine as the CLI, with a browser UI for picking files, previewing
+    the raster, and running classification step by step.
+
+============================================================================
