@@ -1,0 +1,40 @@
+# ============================================================================
+#  Example geocell manifest  (Case 4 in USE_CASES.txt)
+#
+#  One TOML file = one CDB geocell = one classification run.
+#  Run it with:
+#      MaterialClassification_CLI.exe --manifest "path\to\this\geocell.toml"
+#
+#  Copy this file, edit the folders + geocell coordinates + output path,
+#  and point it at your own imagery.
+# ============================================================================
+
+# The 1-degree CDB geocell to produce. Coordinates are the SOUTH-WEST corner
+# (integers). Example below = geocell N33E035 (33N..34N, 35E..36E).
+[geocell]
+south_lat = 33
+west_lon  = 35
+
+# Priority layers of source orthophotos. LOWER priority number = ON TOP
+# (wins where layers overlap), matching QGIS / Photoshop layer order.
+#
+# Each layer auto-discovers *.tif, *.tiff AND *.jp2 by default, so a layer
+# folder of GeoTIFFs, JPEG 2000, or a mix is picked up with no extra config.
+# To narrow a layer to one format, set  glob = "**/*.jp2"  (or a list).
+
+[[layers]]
+folder   = "D:/imagery/2024_jp2"     # newest imagery (JPEG 2000) - on top
+priority = 1
+name     = "2024_jp2"                 # optional, for logging only
+
+[[layers]]
+folder   = "D:/imagery/2019_geotiff" # older imagery (GeoTIFF) - underneath
+priority = 2
+name     = "2019_tif"
+
+# Optional: individual flat files, composited BELOW all [[layers]].
+# sources = ["D:/imagery/one_off_patch.tif"]
+
+[output]
+path      = "D:/out/N33E035_material.tif"   # classified GeoTIFF (+ .xml)
+overwrite = false                            # true to replace an existing file
