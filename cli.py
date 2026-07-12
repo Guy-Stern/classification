@@ -194,6 +194,10 @@ Manifest schema (geocell.toml):
 
     # sources = ["D:/orthos/one_off.tif"]   # optional flat files, below all layers
 
+    [classify]                 # optional; defaults = SAM3 on, water from config
+    sam3       = true          # false = KMeans naturals only (needs no PyTorch)
+    water_mask = "D:/data/water_mask.tif"   # overrides shapefile_config.json
+
     [output]
     path      = "D:/cdb_out/N45E006_material.tif"   # .xml written beside it
     overwrite = false
@@ -205,9 +209,10 @@ Notes:
     layer's resolution (auto). A cell that would exceed ~20000 px/side is
     coarsened with a warning rather than exploding.
   - Files not touching the geocell are dropped before compositing.
-  - SAM3 / SDE (roads, buildings) / water_mask are applied to the mosaic
-    using shapefile_config.json — the manifest carries only geocell +
-    layers + output.
+  - [classify] mirrors the positional flags: sam3=false = --no-sam3 (KMeans
+    naturals only, no PyTorch); water_mask = --water-mask (overrides
+    shapefile_config.json). Omit the table for the defaults (SAM3 on, water
+    from config). SDE (roads/buildings) always comes from shapefile_config.json.
   - --manifest cannot be combined with INPUT/OUTPUT/--input/--output/--classes.
 """
 
@@ -419,9 +424,13 @@ def run_manifest(manifest_path: str):
     Parses the manifest, composites its priority layers of source orthos into a
     single EPSG:4326 mosaic for the manifest's CDB geocell (highest priority
     wins per pixel), then classifies that mosaic with the 6-material MEA
-    pipeline (``classify_v6``) — SAM3 / SDE / water-mask config is read from
-    ``shapefile_config.json`` exactly as in the positional form. Output is a
-    single classified GeoTIFF + MEA XML at the manifest's ``[output]`` path.
+    pipeline (``classify_v6``). SAM3 and the water-mask come from the manifest's
+    optional ``[classify]`` table (defaults: SAM3 on, water from config); SDE
+    (roads/buildings) config is read from ``shapefile_config.json`` exactly as in
+    the positional form. Output is a folder of georeferenced classified tiles at
+    ``<cell>_classified_tiles/`` next to the manifest's ``[output]`` path: the
+    pipeline always tiles, so the output shape is deterministic regardless of the
+    worker's free RAM (the JARVIS geocell pipeline consumes the tiled folder).
     """
     # Light deps (rasterio/pydantic/tomllib) up front; the torch-heavy classify
     # imports (core, pipeline) are deferred until after the mosaic is built so a
@@ -443,6 +452,9 @@ def run_manifest(manifest_path: str):
     print(f"[cli] geocell manifest run: {geocell.name}")
     print(f"      bounds (W,S,E,N):   {tuple(round(b, 4) for b in bounds)}")
     print(f"      output:             {out_path}")
+    _wm = manifest.classify.water_mask
+    print(f"      classify:           sam3={manifest.classify.sam3}, "
+          f"water_mask={_wm if _wm else '(from shapefile_config.json)'}")
     print("=" * 70)
 
     if out_path.exists() and not manifest.output.overwrite:
@@ -477,8 +489,10 @@ def run_manifest(manifest_path: str):
               f"{info['width']}x{info['height']} px @ {info['gsd_deg']:.3e} deg/px; "
               f"{info['missing_fraction'] * 100:.1f}% of the cell uncovered (black fill)")
 
-        # Classify the mosaic as one image. Same MEA defaults as the positional
-        # form; classify_v6 does its own RAM-aware internal tiling for big cells.
+        # Classify the mosaic. Same MEA defaults as the positional form, but we
+        # FORCE tile mode so the output is always a folder of georeferenced tiles
+        # (<cell>_classified_tiles/) — a deterministic shape regardless of free
+        # RAM. Downstream (JARVIS geocell) consumes the tiled folder directly.
         from backend.app.core import MEA_CLASSES
         from backend.app.pipeline import classify_v6
         result = classify_v6(
@@ -487,13 +501,14 @@ def run_manifest(manifest_path: str):
             smoothing="none",
             feature_flags={"spectral": True, "texture": True, "indices": False},
             output_path=str(out_path),
-            sam3_enabled=True,
-            water_mask=None,
-            single_fused_output=True,
-            tile_mode=False,
+            sam3_enabled=manifest.classify.sam3,
+            water_mask=(str(manifest.classify.water_mask)
+                        if manifest.classify.water_mask else None),
+            single_fused_output=False,          # never collapse to a single file
+            tile_mode=True,                     # always tile -> always a folder
             tile_max_pixels=512 ** 2,
             tile_overlap=0,
-            tile_output_dir=None,
+            tile_output_dir=str(out_path),      # -> <cell>_classified_tiles/ beside [output].path
             tile_workers=max(1, os.cpu_count() or 1),
             detect_shadows=False,
             max_threads=None,
@@ -505,7 +520,7 @@ def run_manifest(manifest_path: str):
             pass
 
     if result.get("status") == "ok":
-        print(f"OK Saved: {result.get('outputPath') or out_path}")
+        print(f"OK Saved (tiled folder): {result.get('outputPath') or out_path}")
         sys.exit(0)
     print(f"FAIL: {result.get('message', str(result))}")
     sys.exit(1)

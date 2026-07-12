@@ -3,10 +3,12 @@
 
 One TOML file = one CDB geocell = one ``classify_v6`` run. The manifest
 describes *where the input imagery comes from* (priority layers of source
-orthos — GeoTIFF and/or JPEG 2000) and *where the classified output goes* —
-nothing else. SAM3 / SDE /
-water-mask configuration deliberately stays in ``shapefile_config.json``; a
-stray ``[sde]`` or ``[water]`` table here is rejected (``extra="forbid"``).
+orthos — GeoTIFF and/or JPEG 2000) and *where the classified output goes*. An
+optional ``[classify]`` table carries the two per-run classifier knobs
+(``sam3``, ``water_mask``) that the positional form exposes as ``--no-sam3`` /
+``--water-mask``; SDE (roads, buildings) config still lives in
+``shapefile_config.json``. A stray ``[sde]`` or ``[water]`` table here is
+rejected (``extra="forbid"``).
 
 Schema (see ``docs`` / ``cli.py --examples`` for the annotated version)::
 
@@ -26,6 +28,10 @@ Schema (see ``docs`` / ``cli.py --examples`` for the annotated version)::
     priority = 2
 
     # sources = ["D:/orthos/one_off.tif"]   # optional flat files, below all layers
+
+    [classify]                 # optional; defaults = SAM3 on, water from config
+    sam3       = true          # false = KMeans naturals only (needs no PyTorch)
+    water_mask = "D:/data/water_mask.tif"   # overrides shapefile_config.json
 
     [output]
     path      = "D:/cdb_out/N45E006_material.tif"
@@ -145,12 +151,27 @@ class ParallelismConfig(BaseModel):
     workers: int | str = "auto"
 
 
+class ClassifyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # The two per-run classifier knobs the positional form exposes as --no-sam3
+    # and --water-mask. Manifest mode was previously hardwired to SAM3-on /
+    # config-water; this lets a caller (e.g. an orchestrator generating the
+    # manifest) set them per geocell. Defaults preserve the old behaviour.
+    #   sam3=False       → KMeans naturals only; roads/buildings from SDE or empty
+    #                      (no PyTorch needed).
+    #   water_mask unset → fall back to shapefile_config.json (None below).
+    sam3: bool = True
+    water_mask: Path | None = None
+
+
 class GeocellManifest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     geocell: GeoCellConfig
     layers: Annotated[list[LayerConfig], Field(min_length=1)]
     sources: list[Path] | None = None
+    classify: ClassifyConfig = Field(default_factory=ClassifyConfig)
     output: OutputConfig
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
 
@@ -195,6 +216,9 @@ def _anchor_relative_paths(data: dict, base: Path) -> dict:
             layer["folder"] = _anchor(base, str(layer["folder"]))
     if isinstance(data.get("sources"), list):
         data["sources"] = [_anchor(base, str(s)) for s in data["sources"]]
+    clf = data.get("classify")
+    if isinstance(clf, dict) and clf.get("water_mask") is not None:
+        clf["water_mask"] = _anchor(base, str(clf["water_mask"]))
     out = data.get("output")
     if isinstance(out, dict) and out.get("path") is not None:
         out["path"] = _anchor(base, str(out["path"]))
@@ -225,6 +249,7 @@ __all__ = [
     "LayerConfig",
     "OutputConfig",
     "ParallelismConfig",
+    "ClassifyConfig",
     "GeocellManifest",
     "load_manifest",
 ]
