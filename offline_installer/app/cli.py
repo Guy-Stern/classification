@@ -218,6 +218,7 @@ Notes:
 
 import argparse
 import os
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -457,10 +458,27 @@ def run_manifest(manifest_path: str):
           f"water_mask={_wm if _wm else '(from shapefile_config.json)'}")
     print("=" * 70)
 
-    if out_path.exists() and not manifest.output.overwrite:
-        print(f"FAIL: output already exists (set [output] overwrite = true to replace): {out_path}")
+    # Tiled mode always writes a FOLDER, never the [output].path .tif file — the
+    # pipeline forces tiling below, producing <stem>_classified_tiles/ (and
+    # <stem>_with_vectors_tiles/ when vectors are present). So the overwrite
+    # guard must test those deliverable dirs, not the .tif that is never created.
+    tiled_dirs = [
+        out_path.with_name(out_path.stem + "_classified_tiles"),
+        out_path.with_name(out_path.stem + "_with_vectors_tiles"),
+    ]
+    existing = [d for d in tiled_dirs if d.is_dir() and any(d.iterdir())]
+    if existing and not manifest.output.overwrite:
+        print("FAIL: output already exists (set [output] overwrite = true to replace): "
+              + str(existing[0]))
         sys.exit(1)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # overwrite=true: clear any prior run's tiles up-front so the folder ends
+    # with exactly one run's tile set (never an accumulation), even if the tile
+    # grid changed between runs.
+    if manifest.output.overwrite:
+        for d in tiled_dirs:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
 
     # ── Build the priority mosaic for the geocell ─────────────────────────────
     try:
@@ -509,6 +527,7 @@ def run_manifest(manifest_path: str):
             tile_max_pixels=512 ** 2,
             tile_overlap=0,
             tile_output_dir=str(out_path),      # -> <cell>_classified_tiles/ beside [output].path
+            tile_name_stem=geocell.name,        # deterministic tile names (N33E035_tile_r{r}_c{c}), no PID/.tmp
             tile_workers=max(1, os.cpu_count() or 1),
             detect_shadows=False,
             max_threads=None,
