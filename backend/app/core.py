@@ -2202,6 +2202,7 @@ def classify_and_export(
     tile_workers: Optional[int] = None,
     detect_shadows: bool = False,
     max_threads: Optional[int] = None,
+    tile_name_stem: Optional[str] = None,  # override tile filename stem (default: raster stem)
     pretrained_scaler=None,
     pretrained_kmeans=None,
     pretrained_color_table=None,   # List[Tuple[int,int,int]] - skip per-image MEA mapping
@@ -2476,8 +2477,12 @@ def classify_and_export(
         else:
             out_ext = f".{export_format}" if export_format and export_format != "tif" else ".tif"
         jobs = []
+        # Deterministic tile stem: callers (e.g. the geocell manifest) pass the
+        # cell name so tile filenames are stable across runs instead of leaking
+        # the temp mosaic's PID/'.tmp'/dot-prefixed stem into the deliverable.
+        _tile_stem = tile_name_stem or path.stem
         for row, col, h, w in windows:
-            tile_name = f"{path.stem}_tile_r{row}_c{col}{out_ext}"
+            tile_name = f"{_tile_stem}_tile_r{row}_c{col}{out_ext}"
             jobs.append((
                 raster_path,
                 (row, col, h, w),
