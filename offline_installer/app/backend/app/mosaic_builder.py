@@ -13,13 +13,22 @@ grid via ``WarpedVRT``; a pixel is *valid* where the source has real data
 applied highest-priority-last, so priority=1 is the final writer per pixel and
 its black borders never stomp a real pixel from a lower-priority layer.
 
+**Tier 0 perf (windowed + parallel):** each source is warped only into the
+sub-window of the target grid its own WGS-84 footprint covers — not the full
+cell — so a source touching one corner costs one corner's worth of warp, not a
+whole 20000² frame. The per-source reads run on a ``ThreadPoolExecutor`` (GDAL
+releases the GIL during warp/read); the worker count is derived from
+``_COMPOSITE_RAM_BUDGET`` and the largest window so a few full-cell layers can't
+multiply into an OOM. Results are composited into the shared canvas on the main
+thread in strict priority order, preserving the exact last-wins semantics.
+
 Scale: a full-resolution 1° cell can be enormous, so ``MAX_MOSAIC_SIDE_PX``
 caps the output dimensions — a mosaic that would exceed the cap has its GSD
 coarsened (with a loud warning) rather than exploding to hundreds of GB. The
-composite is done full-frame in RAM (the IER-proven mechanism); the cap keeps
-that bounded. The write step is isolated in :func:`_composite_and_write` so a
-future native-resolution streaming writer can replace it without touching the
-catalog/grid math.
+canvas is still allocated whole (one ``(3, H, W)`` uint8 + a ``(H, W)`` mask);
+the cap keeps that bounded. The write step is isolated in
+:func:`_composite_and_write` so a future per-block streaming writer (Tier 2) can
+replace it without touching the catalog/grid math.
 
 Needs ``rasterio`` + ``numpy`` (both import under the geo-only test
 interpreter). Deliberately does NOT import ``core`` — see ``NEAR_BLACK_RGB_MEAN``
@@ -30,10 +39,13 @@ chain and unit-tests without torch.
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio import windows as _rio_windows
 from rasterio.enums import ColorInterp, Resampling
 from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
@@ -53,6 +65,13 @@ NEAR_BLACK_RGB_MEAN = 8.0
 # GSD coarsened (with a warning) instead of allocating a multi-hundred-GB array.
 # 20000 x 20000 x 3 uint8 ~= 1.15 GB for the composite buffer. Tune here.
 MAX_MOSAIC_SIDE_PX = 20_000
+
+# Peak-RAM budget (bytes) for the concurrent source-window reads during the
+# composite. The worker count is derived so ``workers * largest_window_bytes``
+# stays under this — a handful of full-cell (low-priority) layers read in
+# parallel therefore can't multiply into an OOM; they just read with fewer
+# workers. Independent of the persistent canvas allocation. Tune here.
+_COMPOSITE_RAM_BUDGET = 3_000_000_000
 
 
 def resolve_target_gsd_deg(entries: list[SourceEntry]) -> float:
@@ -101,13 +120,59 @@ def compute_grid(
     return width, height, gsd_used, transform
 
 
-def _read_source_into_grid(
-    src_path: Path,
-    target_transform: "rasterio.Affine",
+# A composite target window: (col0, row0, w, h, win_transform).
+_Window = tuple[int, int, int, int, "rasterio.Affine"]
+
+
+def _source_target_window(
+    src_bounds: tuple[float, float, float, float],
+    cell_bounds: tuple[float, float, float, float],
+    gsd: float,
     width: int,
     height: int,
+    transform: "rasterio.Affine",
+    pad: int = 1,
+) -> _Window | None:
+    """Pixel window of the target grid a source can touch → ``(col0,row0,w,h,win_tf)``.
+
+    Intersects the source's WGS-84 footprint with the cell, converts that to a
+    padded, clipped pixel rectangle on the north-up target grid, and derives the
+    sub-grid affine. Returns ``None`` when the intersection is empty (a
+    touch-only or fully-outside source — normally already dropped by the catalog
+    pre-filter, but cheap to guard here). The 1-px pad absorbs float rounding at
+    the footprint edge so no boundary row/column is dropped.
+    """
+    sw, ss, se, sn = src_bounds
+    cw, cs, ce, cn = cell_bounds
+    iw, ie = max(sw, cw), min(se, ce)
+    isth, into = max(ss, cs), min(sn, cn)
+    if ie <= iw or into <= isth:
+        return None
+
+    west, north = cell_bounds[0], cell_bounds[3]
+    col0 = int(math.floor((iw - west) / gsd)) - pad
+    col1 = int(math.ceil((ie - west) / gsd)) + pad
+    row0 = int(math.floor((north - into) / gsd)) - pad
+    row1 = int(math.ceil((north - isth) / gsd)) + pad
+    col0 = max(0, min(col0, width))
+    col1 = max(0, min(col1, width))
+    row0 = max(0, min(row0, height))
+    row1 = max(0, min(row1, height))
+    w, h = col1 - col0, row1 - row0
+    if w <= 0 or h <= 0:
+        return None
+
+    win_transform = _rio_windows.transform(_rio_windows.Window(col0, row0, w, h), transform)
+    return col0, row0, w, h, win_transform
+
+
+def _read_source_window(
+    src_path: Path,
+    win_transform: "rasterio.Affine",
+    w: int,
+    h: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reproject one source onto the target grid → ``((3, H, W) uint8, (H, W) bool)``.
+    """Reproject one source onto a ``(h, w)`` sub-grid → ``((3,h,w) uint8, (h,w) bool)``.
 
     The bool mask is True where the source contributes a real pixel: inside the
     source's data area (WarpedVRT alpha > 0) AND not a near-black nodata/border
@@ -119,6 +184,10 @@ def _read_source_into_grid(
     here: a source with ``nodata=None`` returns no mask and out-of-extent zeros
     would read as real data. If the source already has an alpha band,
     ``add_alpha=True`` errors, so we add one only when it's missing.
+
+    Only the target window is materialised — GDAL reads just the source blocks
+    that fall under ``win_transform``/``w``/``h``, so cost scales with the
+    source's own footprint, not the whole cell.
     """
     try:
         with rasterio.open(src_path) as src:
@@ -131,13 +200,20 @@ def _read_source_into_grid(
                     f"source has no CRS; assign one with gdal_edit before ingest: {src_path}"
                 )
             src_has_alpha = ColorInterp.alpha in src.colorinterp
+            # AREA-AVERAGE (not bilinear): the mosaic grid is at/below the finest
+            # source GSD, so every source is downsampled — average is the correct
+            # anti-aliased kernel (bilinear undersamples/aliases at high downsample
+            # ratios). It is also defined by each target pixel's footprint, so a
+            # windowed warp is byte-identical to the full-grid warp — which is what
+            # makes this parallel windowed composite provably equal to a serial
+            # one (bilinear/cubic are extent-sensitive and would drift per window).
             with WarpedVRT(
                 src,
                 crs=_WGS84,
-                transform=target_transform,
-                width=width,
-                height=height,
-                resampling=Resampling.bilinear,
+                transform=win_transform,
+                width=w,
+                height=h,
+                resampling=Resampling.average,
                 add_alpha=not src_has_alpha,
             ) as vrt:
                 if vrt.colorinterp[vrt.count - 1] != ColorInterp.alpha:
@@ -157,8 +233,10 @@ def _read_source_into_grid(
     valid = alpha > 0
     # Drop near-black pixels (nodata / mosaic border filled with RGB~0 that is
     # NOT flagged as raster nodata) so they can't win over a real lower-priority
-    # pixel. mean over the 3 bands, same threshold core.py uses on input.
-    mean_rgb = rgb.mean(axis=0)
+    # pixel. mean over the 3 bands, same threshold core.py uses on input. float32
+    # (not the numpy-default float64) halves this transient — it's window-local
+    # now, but there can be many windows in flight.
+    mean_rgb = rgb.mean(axis=0, dtype=np.float32)
     valid &= mean_rgb >= NEAR_BLACK_RGB_MEAN
     return np.ascontiguousarray(rgb), valid
 
@@ -169,8 +247,17 @@ def _composite_and_write(
     height: int,
     transform: "rasterio.Affine",
     out_path: Path,
+    gsd: float,
+    cell_bounds: tuple[float, float, float, float],
 ) -> float:
-    """Full-frame last-wins composite of ``order`` → tiled DEFLATE GeoTIFF.
+    """Windowed, parallel, last-wins composite of ``order`` → tiled DEFLATE GeoTIFF.
+
+    Each source is warped only into the sub-window its footprint covers (see
+    :func:`_source_target_window`); the reads run on a thread pool sized from
+    ``_COMPOSITE_RAM_BUDGET`` and the largest window. Results are applied to the
+    shared canvas on THIS thread in strict ``order`` (priority ascending →
+    priority=1 last), so the last-wins semantics are byte-identical to a serial
+    composite regardless of read-completion order.
 
     Returns the fraction of output pixels left uncovered (black fill). Isolated
     from the grid math so a streaming (per-block) writer can replace it later
@@ -179,10 +266,53 @@ def _composite_and_write(
     result = np.zeros((3, height, width), dtype=np.uint8)  # black fill
     overall_valid = np.zeros((height, width), dtype=bool)
 
+    # Precompute each source's target window in priority order; drop empties.
+    tasks: list[tuple[SourceEntry, _Window]] = []
     for entry in order:
-        rgb, valid = _read_source_into_grid(entry.path, transform, width, height)
-        result[:, valid] = rgb[:, valid]
-        overall_valid |= valid
+        win = _source_target_window(
+            entry.bounds_wgs84, cell_bounds, gsd, width, height, transform
+        )
+        if win is not None:
+            tasks.append((entry, win))
+
+    if tasks:
+        # Size the pool + read-ahead so concurrent window buffers stay under the
+        # RAM budget. ~12 B/px covers the WarpedVRT read + contiguous rgb copy +
+        # alpha + bool mask + float32 mean transient held per in-flight source.
+        largest_px = max(w * h for (_, (_, _, w, h, _)) in tasks)
+        per_src_bytes = max(1, largest_px * 12)
+        workers = int(_COMPOSITE_RAM_BUDGET // per_src_bytes)
+        workers = max(1, min(workers, os.cpu_count() or 1, len(tasks)))
+
+        # Read each source's window on the pool but keep only ~`workers` reads in
+        # flight at once (submit-ahead + apply-in-order + free-on-consume): a HARD
+        # cap on peak RAM regardless of read/apply speed, so a handful of
+        # full-cell low-priority layers can't accumulate into an OOM. Applying in
+        # strict submission order (== composite order, priority=1 last) on this
+        # sole-mutator thread keeps the parallel composite byte-identical to a
+        # serial one. An early read failure also wastes only the in-flight reads,
+        # not all N (the rest were never submitted).
+        n = len(tasks)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            inflight: dict[int, object] = {}
+            submitted = 0
+
+            def _submit_through(upto: int) -> None:
+                nonlocal submitted
+                while submitted < n and submitted <= upto:
+                    entry, (_c0, _r0, w, h, wt) = tasks[submitted]
+                    inflight[submitted] = ex.submit(_read_source_window, entry.path, wt, w, h)
+                    submitted += 1
+
+            for i in range(n):
+                _submit_through(i + workers)   # keep ~workers reads ahead of the cursor
+                _entry, (c0, r0, w, h, _wt) = tasks[i]
+                rgb, valid = inflight.pop(i).result()   # type: ignore[union-attr]
+                sub = result[:, r0:r0 + h, c0:c0 + w]
+                sub[:, valid] = rgb[:, valid]
+                ov = overall_valid[r0:r0 + h, c0:c0 + w]
+                ov[valid] = True
+                del rgb, valid, sub, ov
 
     profile = {
         "driver": "GTiff",
@@ -237,7 +367,9 @@ def build_mosaic(
 
     print(f"[mosaic] {len(order)} source(s) -> {width} x {height} px @ "
           f"{gsd_used:.3e} deg/px (EPSG:4326)")
-    missing = _composite_and_write(order, width, height, transform, out_path)
+    missing = _composite_and_write(
+        order, width, height, transform, out_path, gsd_used, geocell_bounds
+    )
     if missing > 0:
         print(f"[mosaic] {missing * 100.0:.1f}% of the cell uncovered by any source (black fill)")
 
