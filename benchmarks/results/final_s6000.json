@@ -1,0 +1,27 @@
+{
+  "label": "final_s6000",
+  "geocell": "N33E035",
+  "bounds_wsen": [
+    35.0,
+    33.0,
+    36.0,
+    34.0
+  ],
+  "max_side_px": 6000,
+  "layers": [
+    "C:\\Users\\User\\Desktop\\StuffForTests\\RadiometricOrtho\\data:1"
+  ],
+  "discovery_s": 0.158,
+  "discovery_peak_gb": 0.074,
+  "n_kept": 64,
+  "join_s": 2.361,
+  "join_peak_gb": 0.237,
+  "mosaic_wh": [
+    6001,
+    6001
+  ],
+  "gsd_deg": 0.0001666666666666594,
+  "n_sources": 64,
+  "missing_fraction": 0.5108,
+  "total_s": 2.519
+}

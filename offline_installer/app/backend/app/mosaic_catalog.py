@@ -33,6 +33,9 @@ so it imports under the geo-only interpreter used for unit tests.
 
 from __future__ import annotations
 
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -43,6 +46,23 @@ from rasterio.warp import transform_bounds
 from .manifest import LayerConfig
 
 _WGS84 = "EPSG:4326"
+
+# Per-folder footprint cache (Tier 1): a JSON sidecar co-located with the source
+# imagery, mapping each file's folder-relative path to its stat signature +
+# footprint. A footprint is a pure function of the immutable ortho, so a re-run
+# over an unchanged folder skips every GDAL open and does a bare stat-scan. Keyed
+# on (size, mtime_ns) so editing/replacing a source auto-invalidates its row.
+# Co-locating (IER-style) means the cache moves with the data and is shared
+# across manifests/machines; if the folder is read-only the save is skipped
+# silently (caching is an optimisation, never a hard dependency).
+_CACHE_NAME = ".mc_footprint_cache.json"
+_CACHE_VERSION = 1
+
+# Pipeline OUTPUT directory suffixes. Their tiles are EPSG:4326 RGB re-composites
+# / material-index rasters written next to the manifest output; if a layer folder
+# is an ancestor of the output, a recursive glob would otherwise re-ingest them as
+# "sources" on the next run. Discovery skips any file living under such a dir.
+_OUTPUT_DIR_SUFFIXES = ("_mosaic_tiles", "_classified_tiles", "_with_vectors_tiles")
 
 
 @dataclass(frozen=True)
@@ -117,7 +137,21 @@ def _discover(layer: LayerConfig) -> list[Path]:
     deterministic, path-tie-break composite order.
     """
     patterns = layer.glob_patterns()
-    matches = sorted({p for pat in patterns for p in layer.folder.glob(pat)})
+    # Path.glob (unlike the glob module) matches dotfiles, so exclude our own
+    # footprint-cache sidecar: a layer configured with glob="*" / "**/*" would
+    # otherwise pick it up on a later run and feed it to read_footprint (crash).
+    # Also skip anything under a pipeline output dir (see _OUTPUT_DIR_SUFFIXES) so
+    # a run's own mosaic/classified tiles are never re-ingested as sources.
+    _skip = {_CACHE_NAME, _CACHE_NAME + ".tmp"}
+
+    def _keep(p: Path) -> bool:
+        if p.name in _skip:
+            return False
+        return not any(part.endswith(_OUTPUT_DIR_SUFFIXES) for part in p.parts)
+
+    matches = sorted({
+        p for pat in patterns for p in layer.folder.glob(pat) if _keep(p)
+    })
     if not matches:
         shown = patterns[0] if len(patterns) == 1 else patterns
         raise ValueError(
@@ -127,16 +161,118 @@ def _discover(layer: LayerConfig) -> list[Path]:
     return matches
 
 
+def _load_cache(folder: Path) -> dict:
+    """Read a folder's footprint cache sidecar → ``{relpath: {...}}`` (``{}`` on miss)."""
+    try:
+        data = json.loads((folder / _CACHE_NAME).read_text(encoding="utf-8"))
+        if data.get("version") == _CACHE_VERSION and isinstance(data.get("entries"), dict):
+            return data["entries"]
+    except Exception:
+        pass  # missing / corrupt / unreadable cache → treat as empty
+    return {}
+
+
+def _save_cache(folder: Path, entries: dict) -> None:
+    """Atomically write the folder's cache. A read-only folder just disables caching."""
+    dst = folder / _CACHE_NAME
+    tmp = dst.with_name(_CACHE_NAME + ".tmp")
+    try:
+        tmp.write_text(
+            json.dumps({"version": _CACHE_VERSION, "entries": entries}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, dst)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _read_footprints(
+    folder: Path,
+    paths: list[Path],
+    use_cache: bool,
+    max_workers: int | None,
+) -> tuple[dict[Path, tuple[tuple[float, float, float, float], float]], int, int]:
+    """Footprints for ``paths`` → ``({path: (bounds, px)}, n_cache_hits, n_read)``.
+
+    Cache-hit files (matching ``size`` + ``mtime_ns``) skip the GDAL open; the
+    misses are opened in parallel on a thread pool (footprint reads are
+    metadata-only and I/O-bound; ``rasterio.open`` releases the GIL). Halts on
+    the first unreadable/no-CRS source (``read_footprint`` raises), same contract
+    as before. Updated rows are written back to the sidecar once at the end.
+    """
+    cache = _load_cache(folder) if use_cache else {}
+    new_cache = dict(cache)
+    results: dict[Path, tuple[tuple[float, float, float, float], float]] = {}
+    misses: list[tuple[Path, str]] = []  # (path, relkey)
+
+    for p in paths:
+        try:
+            # as_posix so a cache written on Windows is a hit on POSIX and vice
+            # versa (forward-slash keys are portable; str() would embed '\\').
+            relkey = p.relative_to(folder).as_posix()
+        except ValueError:
+            relkey = p.name
+        row = cache.get(relkey)
+        if use_cache and row is not None:
+            try:
+                st = p.stat()
+                b = row["bounds"]
+                if (row["size"] == st.st_size and row["mtime_ns"] == st.st_mtime_ns
+                        and isinstance(b, list) and len(b) == 4):
+                    results[p] = (tuple(b), row["px"])  # type: ignore[assignment]
+                    continue
+            except (OSError, KeyError, TypeError):
+                pass  # stat failure / malformed row → fall through to a real read
+        misses.append((p, relkey))
+
+    if misses:
+        workers = max_workers or min(32, (os.cpu_count() or 4) * 4, len(misses))
+
+        def _work(item: tuple[Path, str]):
+            p, relkey = item
+            bounds, px = read_footprint(p)
+            return p, relkey, bounds, px
+
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            for p, relkey, bounds, px in ex.map(_work, misses):
+                results[p] = (bounds, px)
+                if use_cache:
+                    try:
+                        st = p.stat()
+                        new_cache[relkey] = {
+                            "size": st.st_size,
+                            "mtime_ns": st.st_mtime_ns,
+                            "bounds": list(bounds),
+                            "px": px,
+                        }
+                    except OSError:
+                        pass
+
+    if use_cache and new_cache != cache:
+        _save_cache(folder, new_cache)
+
+    return results, len(paths) - len(misses), len(misses)
+
+
 def build_catalog(
     layers: list[LayerConfig],
     flat_sources: Iterable[Path] | None,
     geocell_bounds: tuple[float, float, float, float],
+    use_cache: bool = True,
+    max_workers: int | None = None,
 ) -> list[SourceEntry]:
     """Discover every source, read footprints, keep only those touching the cell.
 
     ``geocell_bounds`` is ``(west, south, east, north)`` in WGS-84. Flat
     ``sources`` are assigned a priority one greater than the largest layer
     priority, so they composite *below* every ``[[layers]]`` entry.
+
+    Footprints are read in parallel and cached per-folder (Tier 1): a re-run over
+    an unchanged folder skips every GDAL open (bare stat-scan). Pass
+    ``use_cache=False`` to force fresh reads, or ``max_workers`` to cap the pool.
 
     Returns the surviving ``SourceEntry`` list (unordered — call
     :func:`composite_order` for the last-wins compositing sequence). Raises if a
@@ -148,10 +284,11 @@ def build_catalog(
     entries: list[SourceEntry] = []
     for layer in layers:
         matches = _discover(layer)
+        fps, n_hit, n_read = _read_footprints(layer.folder, matches, use_cache, max_workers)
         print(f"[catalog] layer priority={layer.priority} folder={layer.folder} "
-              f"matched {len(matches)} file(s)")
+              f"matched {len(matches)} file(s) (cache: {n_hit} hit, {n_read} read)")
         for p in matches:
-            bounds, px = read_footprint(p)
+            bounds, px = fps[p]
             entries.append(SourceEntry(p.resolve(), layer.priority, bounds, px))
 
     flat_list = [Path(p) for p in flat_sources] if flat_sources else []
@@ -160,7 +297,16 @@ def build_catalog(
         for p in flat_list:
             if not p.exists():
                 raise ValueError(f"sources entry does not exist: {p}")
-            bounds, px = read_footprint(p)
+        # Group flat sources by parent folder so each folder's cache is reused.
+        by_folder: dict[Path, list[Path]] = {}
+        for p in flat_list:
+            by_folder.setdefault(p.parent, []).append(p)
+        flat_fps: dict[Path, tuple[tuple[float, float, float, float], float]] = {}
+        for folder, fpaths in by_folder.items():
+            sub, _h, _r = _read_footprints(folder, fpaths, use_cache, max_workers)
+            flat_fps.update(sub)
+        for p in flat_list:
+            bounds, px = flat_fps[p]
             entries.append(SourceEntry(p.resolve(), flat_priority, bounds, px))
         print(f"[catalog] {len(flat_list)} flat source(s) at priority={flat_priority}")
 
