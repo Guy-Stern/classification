@@ -58,6 +58,12 @@ _WGS84 = "EPSG:4326"
 _CACHE_NAME = ".mc_footprint_cache.json"
 _CACHE_VERSION = 1
 
+# Pipeline OUTPUT directory suffixes. Their tiles are EPSG:4326 RGB re-composites
+# / material-index rasters written next to the manifest output; if a layer folder
+# is an ancestor of the output, a recursive glob would otherwise re-ingest them as
+# "sources" on the next run. Discovery skips any file living under such a dir.
+_OUTPUT_DIR_SUFFIXES = ("_mosaic_tiles", "_classified_tiles", "_with_vectors_tiles")
+
 
 @dataclass(frozen=True)
 class SourceEntry:
@@ -134,10 +140,17 @@ def _discover(layer: LayerConfig) -> list[Path]:
     # Path.glob (unlike the glob module) matches dotfiles, so exclude our own
     # footprint-cache sidecar: a layer configured with glob="*" / "**/*" would
     # otherwise pick it up on a later run and feed it to read_footprint (crash).
+    # Also skip anything under a pipeline output dir (see _OUTPUT_DIR_SUFFIXES) so
+    # a run's own mosaic/classified tiles are never re-ingested as sources.
     _skip = {_CACHE_NAME, _CACHE_NAME + ".tmp"}
+
+    def _keep(p: Path) -> bool:
+        if p.name in _skip:
+            return False
+        return not any(part.endswith(_OUTPUT_DIR_SUFFIXES) for part in p.parts)
+
     matches = sorted({
-        p for pat in patterns for p in layer.folder.glob(pat)
-        if p.name not in _skip
+        p for pat in patterns for p in layer.folder.glob(pat) if _keep(p)
     })
     if not matches:
         shown = patterns[0] if len(patterns) == 1 else patterns

@@ -167,10 +167,13 @@ LAYERED-PRIORITY GEOCELL MODE (--manifest)
 ────────────────────────────────────────────────────────────────────────
 Instead of a batch of independent tiffs, describe ONE CDB geocell and
 LAYERS of source orthos in a TOML manifest. The layers are composited into
-a single EPSG:4326 mosaic for that geocell (highest priority wins per
-pixel, lower layers fill underneath), then classified with the 6-material
-MEA pipeline. Output = one classified GeoTIFF + MEA XML for the geocell —
-ready to drop into a CDB build as raster_material.
+a tiled EPSG:4326 mosaic cache for that geocell (highest priority wins per
+pixel, lower layers fill underneath; built windowed/parallel at the pinned
+overview level and RESUMABLE), then classified with the 6-material MEA
+pipeline. Output = a folder of classified GeoTIFF tiles + MEA XML for the
+geocell (<stem>_classified_tiles/) — ready to drop into a CDB build as
+raster_material. The intermediate mosaic is kept next to the output at
+<stem>_mosaic_tiles/ so re-runs can skip finished work.
 
     python cli.py --manifest geocell.toml
 
@@ -197,6 +200,9 @@ Manifest schema (geocell.toml):
     [classify]                 # optional; defaults = SAM3 on, water from config
     sam3       = true          # false = KMeans naturals only (needs no PyTorch)
     water_mask = "D:/data/water_mask.tif"   # overrides shapefile_config.json
+    max_mosaic_side = 20000    # optional cap on the mosaic's longest side (px).
+                               #   Lower it to trade resolution for speed — the
+                               #   mosaic coarsens its GSD to fit. Default 20000.
 
     [output]
     path      = "D:/cdb_out/N45E006_material.tif"   # .xml written beside it
@@ -422,23 +428,25 @@ def derive_output(input_path: Path, output_arg: str, suffix: str, input_root: Pa
 def run_manifest(manifest_path: str):
     """Layered-priority geocell run driven by a TOML manifest.
 
-    Parses the manifest, composites its priority layers of source orthos into a
-    single EPSG:4326 mosaic for the manifest's CDB geocell (highest priority
-    wins per pixel), then classifies that mosaic with the 6-material MEA
-    pipeline (``classify_v6``). SAM3 and the water-mask come from the manifest's
-    optional ``[classify]`` table (defaults: SAM3 on, water from config); SDE
-    (roads/buildings) config is read from ``shapefile_config.json`` exactly as in
-    the positional form. Output is a folder of georeferenced classified tiles at
-    ``<cell>_classified_tiles/`` next to the manifest's ``[output]`` path: the
-    pipeline always tiles, so the output shape is deterministic regardless of the
-    worker's free RAM (the JARVIS geocell pipeline consumes the tiled folder).
+    Parses the manifest, composites its priority layers of source orthos (highest
+    priority wins per pixel) into a **tiled** EPSG:4326 mosaic cache next to the
+    output (``<stem>_mosaic_tiles/`` + a ``.vrt``), then classifies that mosaic
+    VRT with the 6-material MEA pipeline (``classify_v6``). The tiled mosaic is
+    built windowed/parallel at the pinned overview level (bounded per-tile RAM,
+    no giant temp ``.tif``) and is RESUMABLE — a crashed run reuses finished
+    mosaic tiles. SAM3, the water-mask, and an optional ``max_mosaic_side`` cap
+    come from the manifest's ``[classify]`` table (defaults: SAM3 on, water from
+    config, cap 20000); SDE (roads/buildings) config is read from
+    ``shapefile_config.json`` exactly as in the positional form. Output is a
+    folder of georeferenced classified tiles at ``<cell>_classified_tiles/`` next
+    to the ``[output]`` path (the JARVIS geocell pipeline consumes it directly).
     """
     # Light deps (rasterio/pydantic/tomllib) up front; the torch-heavy classify
     # imports (core, pipeline) are deferred until after the mosaic is built so a
     # bad manifest/mosaic fails fast without paying the model-import cost.
     from backend.app.manifest import load_manifest
     from backend.app.mosaic_catalog import build_catalog, summary_by_priority
-    from backend.app.mosaic_builder import build_mosaic
+    from backend.app.mosaic_builder import build_mosaic_tiled
 
     try:
         manifest = load_manifest(manifest_path)
@@ -466,17 +474,22 @@ def run_manifest(manifest_path: str):
         out_path.with_name(out_path.stem + "_classified_tiles"),
         out_path.with_name(out_path.stem + "_with_vectors_tiles"),
     ]
+    # Intermediate mosaic cache (Tier 2): the priority mosaic is built here as a
+    # folder of georeferenced RGB tiles + a .vrt, next to the output. It is NOT a
+    # deliverable, so it does not gate the overwrite check — a run that crashed
+    # after the mosaic but before/ during classify RESUMES these tiles.
+    mosaic_cache_dir = out_path.with_name(out_path.stem + "_mosaic_tiles")
     existing = [d for d in tiled_dirs if d.is_dir() and any(d.iterdir())]
     if existing and not manifest.output.overwrite:
         print("FAIL: output already exists (set [output] overwrite = true to replace): "
               + str(existing[0]))
         sys.exit(1)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # overwrite=true: clear any prior run's tiles up-front so the folder ends
-    # with exactly one run's tile set (never an accumulation), even if the tile
-    # grid changed between runs.
+    # overwrite=true: clear any prior run's tiles up-front (classified deliverables
+    # AND the mosaic cache) so each folder ends with exactly one run's tile set,
+    # never an accumulation, even if the tile grid changed between runs.
     if manifest.output.overwrite:
-        for d in tiled_dirs:
+        for d in tiled_dirs + [mosaic_cache_dir]:
             if d.is_dir():
                 shutil.rmtree(d, ignore_errors=True)
 
@@ -494,49 +507,62 @@ def run_manifest(manifest_path: str):
         print(f"  priority={prio}: {count} file(s), bbox "
               f"(W={bbox[0]:.4f} S={bbox[1]:.4f} E={bbox[2]:.4f} N={bbox[3]:.4f})")
 
-    # PID in the name so concurrent runs (scheduler / CI double-trigger, or a
-    # re-run while a prior run is still classifying) can't collide on the temp.
-    tmp_mosaic = out_path.parent / f".{geocell.name}_{os.getpid()}_mosaic.tmp.tif"
-    try:
-        try:
-            info = build_mosaic(entries, bounds, tmp_mosaic)
-        except Exception as e:
-            print(f"FAIL: mosaic build failed: {e}")
-            sys.exit(1)
-        print(f"[cli] mosaic: {info['n_sources']} source(s) -> "
-              f"{info['width']}x{info['height']} px @ {info['gsd_deg']:.3e} deg/px; "
-              f"{info['missing_fraction'] * 100:.1f}% of the cell uncovered (black fill)")
+    # ── Build the priority mosaic as a resumable tiled cache + VRT ────────────
+    # Instead of one giant temp .tif held whole in RAM then read back, build the
+    # cell as a folder of georeferenced RGB tiles (<stem>_mosaic_tiles/) and emit
+    # a .vrt over them. classify_v6 consumes the VRT as one raster — no full-frame
+    # write+read round-trip, bounded per-tile RAM, and a crashed run resumes the
+    # finished mosaic tiles. The cache also lets a re-run skip mosaic work.
+    def _mosaic_progress(done, total, status):
+        step = max(1, total // 20)   # ~5% cadence so a long build visibly moves
+        if done == total or done % step == 0:
+            print(f"  [mosaic] tile {done}/{total} ({status})", flush=True)
 
-        # Classify the mosaic. Same MEA defaults as the positional form, but we
-        # FORCE tile mode so the output is always a folder of georeferenced tiles
-        # (<cell>_classified_tiles/) — a deterministic shape regardless of free
-        # RAM. Downstream (JARVIS geocell) consumes the tiled folder directly.
-        from backend.app.core import MEA_CLASSES
-        from backend.app.pipeline import classify_v6
-        result = classify_v6(
-            raster_path=str(tmp_mosaic),
-            classes=MEA_CLASSES,
-            smoothing="none",
-            feature_flags={"spectral": True, "texture": True, "indices": False},
-            output_path=str(out_path),
-            sam3_enabled=manifest.classify.sam3,
-            water_mask=(str(manifest.classify.water_mask)
-                        if manifest.classify.water_mask else None),
-            single_fused_output=False,          # never collapse to a single file
-            tile_mode=True,                     # always tile -> always a folder
-            tile_max_pixels=512 ** 2,
-            tile_overlap=0,
-            tile_output_dir=str(out_path),      # -> <cell>_classified_tiles/ beside [output].path
-            tile_name_stem=geocell.name,        # deterministic tile names (N33E035_tile_r{r}_c{c}), no PID/.tmp
-            tile_workers=max(1, os.cpu_count() or 1),
-            detect_shadows=False,
-            max_threads=None,
+    _tiled_kwargs = {}
+    if manifest.classify.max_mosaic_side:
+        _tiled_kwargs["max_side_px"] = manifest.classify.max_mosaic_side
+    try:
+        info = build_mosaic_tiled(
+            entries, bounds, mosaic_cache_dir,
+            tile_name_stem=geocell.name,
+            overwrite=manifest.output.overwrite,
+            progress_cb=_mosaic_progress,
+            **_tiled_kwargs,
         )
-    finally:
-        try:
-            tmp_mosaic.unlink(missing_ok=True)
-        except Exception:
-            pass
+    except Exception as e:
+        print(f"FAIL: mosaic build failed: {e}")
+        sys.exit(1)
+    print(f"[cli] mosaic: {info['n_sources']} source(s) -> "
+          f"{info['width']}x{info['height']} px @ {info['gsd_deg']:.3e} deg/px; "
+          f"{info['n_written']} built / {info['n_skipped']} reused / {info['n_empty']} empty; "
+          f"{info['missing_fraction'] * 100:.1f}% uncovered (black fill)")
+    print(f"      mosaic cache: {mosaic_cache_dir}  (VRT: {Path(info['vrt_path']).name})")
+
+    # Classify the mosaic VRT. Same MEA defaults as the positional form, but we
+    # FORCE tile mode so the output is always a folder of georeferenced tiles
+    # (<cell>_classified_tiles/) — a deterministic shape regardless of free RAM.
+    # Downstream (JARVIS geocell) consumes the tiled folder directly.
+    from backend.app.core import MEA_CLASSES
+    from backend.app.pipeline import classify_v6
+    result = classify_v6(
+        raster_path=info["vrt_path"],
+        classes=MEA_CLASSES,
+        smoothing="none",
+        feature_flags={"spectral": True, "texture": True, "indices": False},
+        output_path=str(out_path),
+        sam3_enabled=manifest.classify.sam3,
+        water_mask=(str(manifest.classify.water_mask)
+                    if manifest.classify.water_mask else None),
+        single_fused_output=False,          # never collapse to a single file
+        tile_mode=True,                     # always tile -> always a folder
+        tile_max_pixels=512 ** 2,
+        tile_overlap=0,
+        tile_output_dir=str(out_path),      # -> <cell>_classified_tiles/ beside [output].path
+        tile_name_stem=geocell.name,        # deterministic tile names (N33E035_tile_r{r}_c{c})
+        tile_workers=max(1, os.cpu_count() or 1),
+        detect_shadows=False,
+        max_threads=None,
+    )
 
     if result.get("status") == "ok":
         print(f"OK Saved (tiled folder): {result.get('outputPath') or out_path}")

@@ -248,6 +248,75 @@ def test_windowed_parallel_matches_serial_fullgrid():
     )
 
 
+def test_tiled_mosaic_matches_whole_via_vrt():
+    # The tiled builder + its VRT must reassemble to a raster byte-identical to
+    # the whole-cell build_mosaic — proves per-tile compositing == whole-cell and
+    # that the hand-written VRT reads back correctly (incl. across tile seams).
+    with tempfile.TemporaryDirectory() as td:
+        base = _solid(Path(td) / "base.tif", CELL, (40, 60, 200), size=120)
+        left = _solid(Path(td) / "left.tif", (6.0, 45.0, 6.5, 46.0), (200, 30, 30), size=120)
+        grad = _gradient(Path(td) / "grad.tif", (6.3, 45.3, 6.7, 45.7), size=400)
+        entries = [
+            _entry(base, 3, 120, CELL),
+            _entry(left, 2, 120, (6.0, 45.0, 6.5, 46.0)),
+            _entry(grad, 1, 400, (6.3, 45.3, 6.7, 45.7)),
+        ]
+        whole = Path(td) / "whole.tif"
+        mb.build_mosaic(entries, CELL, whole)
+        warr, _, _ = _read(whole)
+        info = mb.build_mosaic_tiled(entries, CELL, Path(td) / "tiles",
+                                     tile_px=256, tile_name_stem="N45E006")
+        with rasterio.open(info["vrt_path"]) as v:
+            varr = v.read()
+    assert varr.shape == warr.shape, (varr.shape, warr.shape)
+    assert np.array_equal(varr, warr), (
+        f"tiled+VRT diverged from whole-cell: "
+        f"{int(np.count_nonzero(np.any(varr != warr, axis=0)))} px differ")
+
+
+def test_tiled_mosaic_resume_skips_finished_tiles():
+    with tempfile.TemporaryDirectory() as td:
+        base = _solid(Path(td) / "b.tif", CELL, (50, 90, 180), size=200)   # covers whole cell
+        entries = [_entry(base, 1, 200, CELL)]
+        tiles_dir = Path(td) / "t"
+        prog1 = []
+        i1 = mb.build_mosaic_tiled(entries, CELL, tiles_dir, tile_px=100,
+                                   tile_name_stem="c", progress_cb=lambda d, t, s: prog1.append(s))
+        assert i1["n_written"] == i1["n_tiles"] > 0
+        assert len(prog1) == i1["n_tiles"]                 # progress fired per tile
+        victim = sorted(tiles_dir.glob("c_mtile_*.tif"))[0]
+        victim.unlink()                                    # simulate a crashed/partial run
+        i2 = mb.build_mosaic_tiled(entries, CELL, tiles_dir, tile_px=100,
+                                   tile_name_stem="c", overwrite=False)
+        assert i2["n_written"] == 1, i2                    # only the missing tile rebuilt
+        assert i2["n_skipped"] == i1["n_tiles"] - 1, i2    # the rest reused
+        assert victim.exists()                             # and it's back on disk
+
+
+def test_tiled_mosaic_invalidates_stale_grid_cache():
+    # A cache built for one grid must be PURGED when the grid changes (here via a
+    # different max_side), so the VRT never maps old-grid tiles to new offsets
+    # (which would silently corrupt the geography). Same tile_px means the r/c
+    # names collide — the signature guard, not the names, must catch it.
+    with tempfile.TemporaryDirectory() as td:
+        g = _gradient(Path(td) / "g.tif", CELL, size=400)   # covers whole cell
+        entries = [_entry(g, 1, 400, CELL)]
+        tiles_dir = Path(td) / "t"
+        mb.build_mosaic_tiled(entries, CELL, tiles_dir, tile_px=64,
+                              max_side_px=128, tile_name_stem="c")            # coarse grid
+        i2 = mb.build_mosaic_tiled(entries, CELL, tiles_dir, tile_px=64,
+                                   max_side_px=256, tile_name_stem="c",
+                                   overwrite=False)                          # finer grid, resume
+        whole = Path(td) / "whole.tif"
+        mb.build_mosaic(entries, CELL, whole, max_side_px=256)
+        warr, _, _ = _read(whole)
+        with rasterio.open(i2["vrt_path"]) as v:
+            varr = v.read()
+    assert i2["n_skipped"] == 0, i2                     # every stale tile rebuilt, none reused
+    assert i2["width"] == warr.shape[2] == 256
+    assert np.array_equal(varr, warr), "stale-grid cache leaked into the new-grid VRT"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -32,6 +32,7 @@ Schema (see ``docs`` / ``cli.py --examples`` for the annotated version)::
     [classify]                 # optional; defaults = SAM3 on, water from config
     sam3       = true          # false = KMeans naturals only (needs no PyTorch)
     water_mask = "D:/data/water_mask.tif"   # overrides shapefile_config.json
+    max_mosaic_side = 20000    # optional px cap on the mosaic's longest side
 
     [output]
     path      = "D:/cdb_out/N45E006_material.tif"
@@ -163,6 +164,12 @@ class ClassifyConfig(BaseModel):
     #   water_mask unset → fall back to shapefile_config.json (None below).
     sam3: bool = True
     water_mask: Path | None = None
+    # Optional cap on the mosaic's longest side in pixels. A full-res 1° cell can
+    # be >100k px/side; the mosaic coarsens its GSD to fit this cap (default
+    # 20000 in mosaic_builder). Lower it to trade resolution for speed — the
+    # single cheapest lever when a coarser material map is acceptable. None keeps
+    # the builder default.
+    max_mosaic_side: Annotated[int, Field(ge=256, le=100_000)] | None = None
 
 
 class GeocellManifest(BaseModel):

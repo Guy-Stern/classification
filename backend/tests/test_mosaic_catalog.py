@@ -184,6 +184,22 @@ def test_cache_sidecar_not_rediscovered_as_source():
     assert sorted(e.path.name for e in kept) == ["a.tif"]
 
 
+def test_discovery_skips_pipeline_output_dirs():
+    # A recursive layer glob whose folder is an ancestor of the output must NOT
+    # re-ingest a prior run's own mosaic/classified tiles as sources.
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td) / "orthos"; folder.mkdir()
+        _tif(folder / "real.tif", (6.2, 45.2, 6.4, 45.4))
+        for sub, name in [("N45E006_mosaic_tiles", "N45E006_mtile_r0_c0.tif"),
+                          ("N45E006_classified_tiles", "N45E006_tile_r0_c0.tif"),
+                          ("N45E006_with_vectors_tiles", "N45E006_wv_r0_c0.tif")]:
+            d = folder / sub; d.mkdir()
+            _tif(d / name, (6.2, 45.2, 6.4, 45.4))
+        layer = LayerConfig(folder=folder, priority=1, glob="**/*.tif")
+        kept = mc.build_catalog([layer], None, CELL)
+    assert sorted(e.path.name for e in kept) == ["real.tif"], [e.path.name for e in kept]
+
+
 def test_use_cache_false_skips_sidecar():
     with tempfile.TemporaryDirectory() as td:
         folder = Path(td) / "lay"; folder.mkdir()

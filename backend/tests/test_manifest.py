@@ -55,6 +55,24 @@ def test_valid_manifest_parses():
     assert m.geocell.to_geocell().name == "N45E006"
 
 
+def test_classify_max_mosaic_side_parses_and_defaults():
+    with tempfile.TemporaryDirectory() as td:
+        m = load_manifest(_write(td, VALID))
+        assert m.classify.max_mosaic_side is None      # default: builder's own cap
+        m2 = load_manifest(_write(td, VALID + "\n[classify]\nsam3 = false\nmax_mosaic_side = 8000\n"))
+    assert m2.classify.max_mosaic_side == 8000 and m2.classify.sam3 is False
+
+
+def test_classify_max_mosaic_side_out_of_range_rejected():
+    import pydantic
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            load_manifest(_write(td, VALID + "\n[classify]\nmax_mosaic_side = 10\n"))  # < 256
+        except (pydantic.ValidationError, ValueError):
+            return
+    raise AssertionError("expected a validation error for max_mosaic_side below the minimum")
+
+
 def test_extra_top_level_table_rejected():
     # Locked decision: SDE/water config stays in shapefile_config.json, so a
     # stray [sde] table must fail loudly (extra="forbid").
