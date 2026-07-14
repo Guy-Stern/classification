@@ -191,6 +191,38 @@ def test_uncovered_cell_area_is_black_fill():
     assert _pixel(arr, tr, 6.02, 45.98) == (0, 0, 0)          # outside -> black fill
 
 
+def test_pick_overview_level():
+    f = mb._pick_overview_level
+    assert f([2, 4, 8, 16], 18.0) == 3        # largest factor <= 18 is 16 (idx 3)
+    assert f([2, 4, 8, 16], 16.0) == 3        # exact factor -> that level
+    assert f([2, 4, 8], 4.0) == 1             # exact
+    assert f([2, 4, 8], 3.0) == 0             # only factor 2 qualifies
+    assert f([2, 4, 8], 1.5) is None          # target finer than first overview
+    assert f([], 10.0) is None                # no overviews
+    assert f([2, 4, 8, 16], 100.0) == 3       # caps at the coarsest available
+
+
+def test_overview_pinning_is_window_invariant():
+    # Exercises the OVERVIEW_LEVEL pinning branch (skipped by every other test,
+    # whose tiles have no overviews): an overviewed source downsampled ~13x must
+    # read byte-identically whether warped into the full grid or a tight window.
+    from rasterio.enums import Resampling as _R
+    with tempfile.TemporaryDirectory() as td:
+        b = (6.2, 45.2, 6.8, 45.8)
+        p = _gradient(Path(td) / "hi.tif", b, size=800)     # 0.6 deg / 800 = 7.5e-4 deg/px
+        with rasterio.open(p, "r+") as s:
+            s.build_overviews([2, 4, 8], _R.average)
+        gsd = 0.01                                          # downsample ~13x -> pins overview 8
+        w_px = h_px = 100
+        tr = from_bounds(6.0, 45.0, 7.0, 46.0, w_px, h_px)
+        src_px = 0.6 / 800
+        full_rgb, full_val = mb._read_source_window(p, tr, w_px, h_px, src_px, gsd)   # full grid
+        c0, r0, ww, hh, wt = mb._source_target_window(b, CELL, gsd, w_px, h_px, tr)
+        win_rgb, win_val = mb._read_source_window(p, wt, ww, hh, src_px, gsd)         # tight window
+    assert np.array_equal(full_rgb[:, r0:r0 + hh, c0:c0 + ww], win_rgb), "pinned rgb window != full-grid"
+    assert np.array_equal(full_val[r0:r0 + hh, c0:c0 + ww], win_val), "pinned mask window != full-grid"
+
+
 def test_windowed_parallel_matches_serial_fullgrid():
     # Multi-source scene with partial coverage, overlap, mixed priorities, and a
     # DOWNSAMPLED gradient tile — the windowed+parallel composite must be

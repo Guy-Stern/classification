@@ -131,6 +131,68 @@ def test_flat_sources_get_lowest_priority():
     assert mc.composite_order(entries)[0].path.name == "flat.tif"
 
 
+def test_footprint_cache_hit_avoids_reopen():
+    # A warm run over an unchanged folder must serve every footprint from the
+    # sidecar cache — proven by making a real read_footprint EXPLODE and asserting
+    # the second build still succeeds with identical entries.
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td) / "lay"; folder.mkdir()
+        _tif(folder / "a.tif", (6.2, 45.2, 6.4, 45.4))
+        _tif(folder / "b.tif", (6.5, 45.5, 6.7, 45.7))
+        layer = LayerConfig(folder=folder, priority=1, glob="*.tif")
+        first = mc.build_catalog([layer], None, CELL)          # cold: writes cache
+        assert (folder / mc._CACHE_NAME).exists(), "cold run should write the cache sidecar"
+
+        def _boom(p):
+            raise AssertionError(f"cache miss re-opened {p}")
+
+        orig = mc.read_footprint
+        mc.read_footprint = _boom
+        try:
+            warm = mc.build_catalog([layer], None, CELL)       # warm: must not read
+        finally:
+            mc.read_footprint = orig
+    assert sorted(e.path.name for e in warm) == sorted(e.path.name for e in first)
+
+
+def test_footprint_cache_invalidates_on_change():
+    # A file whose bytes change (size/mtime differ from the cached signature) must
+    # be re-read, and the fresh footprint must replace the stale cached one.
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td) / "lay"; folder.mkdir()
+        _tif(folder / "a.tif", (6.2, 45.2, 6.4, 45.4), size=100)
+        layer = LayerConfig(folder=folder, priority=1, glob="*.tif")
+        mc.build_catalog([layer], None, CELL)                  # cold: caches size=100² row
+        # Rewrite with different bounds AND a different size -> stat signature changes.
+        _tif(folder / "a.tif", (6.1, 45.1, 6.6, 45.6), size=120)
+        kept = mc.build_catalog([layer], None, CELL)           # warm: signature mismatch -> re-read
+    entry = next(e for e in kept if e.path.name == "a.tif")
+    assert abs(entry.bounds_wgs84[0] - 6.1) < 1e-6, entry.bounds_wgs84
+
+
+def test_cache_sidecar_not_rediscovered_as_source():
+    # A permissive glob ("*") must NOT pick up the cache sidecar written on a
+    # prior run (Path.glob matches dotfiles); otherwise run 2 crashes feeding the
+    # JSON to read_footprint.
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td) / "lay"; folder.mkdir()
+        _tif(folder / "a.tif", (6.2, 45.2, 6.4, 45.4))
+        layer = LayerConfig(folder=folder, priority=1, glob="*")
+        mc.build_catalog([layer], None, CELL)          # run 1: writes sidecar
+        assert (folder / mc._CACHE_NAME).exists()
+        kept = mc.build_catalog([layer], None, CELL)    # run 2: sidecar must be ignored
+    assert sorted(e.path.name for e in kept) == ["a.tif"]
+
+
+def test_use_cache_false_skips_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td) / "lay"; folder.mkdir()
+        _tif(folder / "a.tif", (6.2, 45.2, 6.4, 45.4))
+        layer = LayerConfig(folder=folder, priority=1, glob="*.tif")
+        mc.build_catalog([layer], None, CELL, use_cache=False)
+    assert not (folder / mc._CACHE_NAME).exists(), "use_cache=False must not write a sidecar"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
