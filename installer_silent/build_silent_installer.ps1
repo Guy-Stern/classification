@@ -51,7 +51,8 @@ if (-not $OfflineDir) { $OfflineDir = Join-Path $root 'offline_installer' }
 if (-not $AssetsDir)  { $AssetsDir  = Join-Path $root 'installer_assets' }
 if (-not $OutFile)    { $OutFile    = Join-Path $root 'MaterialClassification_Silent_Setup.exe' }
 if (-not $BuildTools) { $BuildTools = Join-Path $root '_build_tools' }
-if (-not $LauncherCs) { $LauncherCs = Join-Path $scriptDir 'SilentSetupLauncher.cs' }
+$LauncherC = Join-Path $scriptDir 'native_launcher.c'
+$ExtractPs = Join-Path $scriptDir 'silent_extract.ps1'
 $OfflineDir = [System.IO.Path]::GetFullPath($OfflineDir)
 $AssetsDir  = [System.IO.Path]::GetFullPath($AssetsDir)
 $OutFile    = [System.IO.Path]::GetFullPath($OutFile)
@@ -62,27 +63,49 @@ New-Item -ItemType Directory -Path $BuildTools -Force | Out-Null
 Add-Type -AssemblyName System.IO.Compression | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
 
-$TRAILER_MAGIC = [System.Text.Encoding]::ASCII.GetBytes('MCSFX001')  # matches SilentSetupLauncher.cs
+$TRAILER_MAGIC = [System.Text.Encoding]::ASCII.GetBytes('MCSFX001')  # matches native_launcher.c
 
-# -- Compile the C# launcher to a standalone console exe ----------------------
-function Compile-Launcher([string]$csFile, [string]$outExe) {
-    if (-not (Test-Path -LiteralPath $csFile)) { Die "Launcher source not found: $csFile" }
-    $provider = New-Object Microsoft.CSharp.CSharpCodeProvider
-    $params = New-Object System.CodeDom.Compiler.CompilerParameters
-    $params.GenerateExecutable = $true
-    $params.OutputAssembly = $outExe
-    $params.CompilerOptions = '/target:exe /platform:x64 /optimize'
-    foreach ($ref in @('System.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')) {
-        [void]$params.ReferencedAssemblies.Add($ref)
+# -- Locate the MSVC toolchain (vcvars64.bat) ---------------------------------
+function Find-VcVars {
+    $roots = @("${env:ProgramFiles}\Microsoft Visual Studio",
+               "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        $hit = Get-ChildItem -LiteralPath $r -Recurse -Filter 'vcvars64.bat' -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($hit) { return $hit.FullName }
     }
+    Die ('Could not find vcvars64.bat (MSVC Build Tools). Install "Desktop development ' +
+         'with C++" or set the toolchain up, then re-run.')
+}
+
+# -- Compile the NATIVE launcher stub, with silent_extract.ps1 base64-embedded.
+#    Native (not managed) so Windows can LAUNCH the >4 GB single-file exe. -----
+function Compile-NativeLauncher([string]$outExe) {
+    if (-not (Test-Path -LiteralPath $LauncherC)) { Die "Launcher source not found: $LauncherC" }
+    if (-not (Test-Path -LiteralPath $ExtractPs)) { Die "Extract script not found: $ExtractPs" }
+
+    # Embed silent_extract.ps1 as a UTF-16 base64 string for `powershell -EncodedCommand`.
+    $psText = [System.IO.File]::ReadAllText($ExtractPs)
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($psText))
+    $cSrc = ([System.IO.File]::ReadAllText($LauncherC)).Replace('@@ENC@@', $enc)
+    $cGen = Join-Path $BuildTools 'native_launcher.gen.c'
+    [System.IO.File]::WriteAllText($cGen, $cSrc, (New-Object System.Text.ASCIIEncoding))
+
+    $vcvars = Find-VcVars
+    Info "MSVC: $vcvars"
     if (Test-Path -LiteralPath $outExe) { Remove-Item -LiteralPath $outExe -Force }
-    $src = [System.IO.File]::ReadAllText($csFile)
-    $res = $provider.CompileAssemblyFromSource($params, $src)
-    if ($res.Errors.HasErrors) {
-        foreach ($e in $res.Errors) { Write-Host ("  " + $e.ToString()) -ForegroundColor Red }
-        Die 'Launcher compilation failed.'
+    $bat = Join-Path $BuildTools 'compile_native.bat'
+    $batText = '@echo off' + "`r`n" +
+               ('call "{0}" >nul' -f $vcvars) + "`r`n" +
+               ('cd /d "{0}"' -f $BuildTools) + "`r`n" +
+               ('cl /nologo /O1 /DUNICODE /D_UNICODE "{0}" /Fe:"{1}" /link kernel32.lib' -f $cGen, $outExe) + "`r`n" +
+               'exit /b %ERRORLEVEL%' + "`r`n"
+    [System.IO.File]::WriteAllText($bat, $batText, (New-Object System.Text.ASCIIEncoding))
+    & cmd /c "`"$bat`""
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outExe)) {
+        Die "native launcher compile failed (cl exit $LASTEXITCODE)."
     }
-    if (-not (Test-Path -LiteralPath $outExe)) { Die 'Launcher exe not produced.' }
 }
 
 # -- Build a ZIP of a directory (stored, no compression: payload bytes are
@@ -173,9 +196,9 @@ exit 42
 }
 
 # -- Run ----------------------------------------------------------------------
-$launcherExe = Join-Path $BuildTools 'SilentSetupLauncher.exe'
-Info "Compiling launcher: $LauncherCs"
-Compile-Launcher $LauncherCs $launcherExe
+$launcherExe = Join-Path $BuildTools 'native_launcher.exe'
+Info "Compiling native launcher: $LauncherC"
+Compile-NativeLauncher $launcherExe
 
 if (-not $SkipSelfTest) { Invoke-SelfTest $launcherExe }
 else { Info 'Self-test SKIPPED (-SkipSelfTest). Exit-code propagation is UNVERIFIED.' }
@@ -183,10 +206,13 @@ else { Info 'Self-test SKIPPED (-SkipSelfTest). Exit-code propagation is UNVERIF
 if ($SelfTestOnly) { Info 'Self-test only - stopping before payload build.'; exit 0 }
 
 # -- Sanity-check the offline payload -----------------------------------------
+# LEAN installer: bundles Python + app CODE only. The heavy, version-stable data
+# (wheels + weights) is NOT bundled - it lives in the per-box shared dir, so the
+# installer stays well under the 4 GB Windows exe launch limit.
 Info "offline payload: $OfflineDir"
-foreach ($need in @('app', 'offline_packages', 'app\requirements.txt')) {
+foreach ($need in @('app', 'app\requirements.txt')) {
     if (-not (Test-Path -LiteralPath (Join-Path $OfflineDir $need))) {
-        Die "offline_installer is incomplete (missing '$need'). Run prepare_offline.bat first."
+        Die "offline_installer is incomplete (missing '$need')."
     }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $OfflineDir 'prerequisites\python311\python.exe'))) {
@@ -194,19 +220,25 @@ if (-not (Test-Path -LiteralPath (Join-Path $OfflineDir 'prerequisites\python311
     Info '         installer will fall back to a system Python 3.11 on the target.'
 }
 
-# -- Stage the payload --------------------------------------------------------
+# -- Stage the LEAN payload ---------------------------------------------------
 Info "Staging payload -> $StagingDir"
 if (Test-Path -LiteralPath $StagingDir) { Remove-Item -LiteralPath $StagingDir -Recurse -Force }
 New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
 
-# offline_installer/* (app, offline_packages*, prerequisites) - the install source.
-Get-ChildItem -LiteralPath $OfflineDir -Force |
-    Where-Object { $_.Name -notin @('Setup.ps1', 'Setup.bat', 'README.md', 'README.txt', 'STANDALONE_DEPLOYMENT.md') } |
-    ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $StagingDir $_.Name) -Recurse -Force
-    }
+# app\ code, WITHOUT models\ (weights are shared, not per-version).
+$stagedApp = Join-Path $StagingDir 'app'
+New-Item -ItemType Directory -Path $stagedApp -Force | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $OfflineDir 'app') -Force |
+    Where-Object { $_.Name -ne 'models' } |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stagedApp $_.Name) -Recurse -Force }
 
-# assets/ - the Post-Install extras the silent installer folds in.
+# Full venv-capable Python 3.11 (small).
+$prereq = Join-Path $OfflineDir 'prerequisites'
+if (Test-Path -LiteralPath $prereq) {
+    Copy-Item -LiteralPath $prereq -Destination (Join-Path $StagingDir 'prerequisites') -Recurse -Force
+}
+
+# assets/ - examples + shapefile example (+ BPE as a small fallback; normally shared).
 $stagedAssets = Join-Path $StagingDir 'assets'
 New-Item -ItemType Directory -Path $stagedAssets -Force | Out-Null
 foreach ($a in @('sam3_runtime', 'examples')) {
@@ -216,14 +248,19 @@ foreach ($a in @('sam3_runtime', 'examples')) {
 $shpEx = Join-Path $AssetsDir 'shapefile_config.example.json'
 if (Test-Path -LiteralPath $shpEx) { Copy-Item -LiteralPath $shpEx -Destination $stagedAssets -Force }
 
-# The installer script at the payload root (the launcher runs it directly).
+# The installer script at the payload root.
 Copy-Item -LiteralPath (Join-Path $scriptDir 'silent_install.ps1') -Destination $StagingDir -Force
 
 # -- Build the single exe -----------------------------------------------------
 $zipPath = Join-Path $BuildTools 'silent_payload.zip'
-Info 'Building payload ZIP (this can take a while for a multi-GB payload)...'
+Info 'Building payload ZIP...'
 Build-PayloadZip $StagingDir $zipPath
-Info ("payload.zip = {0} GB" -f [math]::Round((Get-Item $zipPath).Length / 1GB, 2))
+$zipGB = [math]::Round((Get-Item $zipPath).Length / 1GB, 2)
+Info ("payload.zip = {0} GB" -f $zipGB)
+if ((Get-Item $zipPath).Length -ge 3.9GB) {
+    Die ("payload is {0} GB - too close to the 4 GB Windows exe launch limit. " +
+         "Ensure models\ and wheels are excluded (shared-data model)." -f $zipGB)
+}
 Info "Assembling $OutFile"
 New-Overlay $launcherExe $zipPath $OutFile
 

@@ -11,10 +11,24 @@ fleet automatically.
 | File | What it is |
 |---|---|
 | `silent_install.ps1` | The headless installer brain. Does everything `Setup.ps1` + `Post-Install.bat` do, unattended, with fatal exit codes. Creates a real `.venv`, pip-installs the offline wheels (core + torch + `sam3`/`timm`/`triton-windows`), drops the SAM3 BPE asset, copies the program tree, writes `start.bat`, preserves per-box config. Guards the OpenMP exit-139 segfault via a venv `sitecustomize.py`. |
-| `SilentSetupLauncher.cs` | The single-exe launcher (compiled in-box). Parses `-InstallDir`, extracts the appended ZIP payload, runs `silent_install.ps1`, and returns its exit code. Chosen over a 7-Zip SFX because the SFX can't take a redirectable install dir. |
-| `build_silent_installer.ps1` | Compiles the launcher, ZIPs the offline payload, and appends it as an overlay to produce one `MaterialClassification_Silent_Setup.exe`. Runs a **self-test** first that proves `-InstallDir` is forwarded and the exit code propagates. |
+| `native_launcher.c` | The single-exe **native** stub (compiled in-box with MSVC `cl.exe`). Parses `-InstallDir`, then runs the embedded `silent_extract.ps1` via `powershell -EncodedCommand`. Native because Windows can't launch a *managed* exe with a >4 GB overlay; a native PE ignores the overlay. |
+| `silent_extract.ps1` | Extraction stage (base64-embedded in the stub). Reads the exe as data via a ZIP64 sub-stream, extracts the payload to a scratch temp dir, runs `silent_install.ps1`, returns its exit code. |
+| `build_silent_installer.ps1` | Compiles the native stub, ZIPs the offline payload, and appends it as an overlay to produce one `MaterialClassification_Silent_Setup.exe`. Runs a **self-test** first that proves `-InstallDir` is forwarded and the exit code propagates. |
+| `provision_shared.ps1` | Stages the ~15 GB **shared data** (wheels + weights) once per box from a full publish (e.g. `Publishes\InstallerV19`). The installer reads wheels/weights from here. |
 | `make_recipe.ps1` | Emits `recipe.json` (the Workshop release recipe) with the resolved version, `entry`, `install_args`, measured footprint, `self_contained:false`, and the `preserve` list. |
+| `verify_against_jarvis.py` | Real end-to-end checks against the actual JARVIS agent + server code (run with the JARVIS venv). |
 | `VALIDATION.md` | Clause-by-clause proof + the clean-box test procedure. |
+
+## The 4 GB limit and the shared-data split
+
+Windows can't launch an `.exe` above 4 GiB, and the full offline payload is
+~17 GB. So the heavy, version-stable data (pip wheels + HF cache + SAM3 weights)
+is provisioned **once per box** into `C:\JARVIS\shared\material_classification\`
+(`provision_shared.ps1`), and the managed installer is a small (~170 MB)
+bootstrap that builds each version's venv from those shared wheels and points
+`app_config.json` at the shared weights. The installer finds the shared dir by
+convention from the install dir (`<jarvis_root>\shared\material_classification`),
+or via the `MC_SHARED_DIR` env var. See `AIRGAP_A4000_DEPLOY.md`.
 
 ## How it's wired into publishing ("every version")
 
@@ -58,8 +72,11 @@ with it. `self_contained` is `false` with `preserve:["app_config.json",
 
 - **Build machine:** a completed `offline_installer\` tree (from
   `prepare_offline.bat`, including a full venv-capable `prerequisites\python311\`),
-  PowerShell 5.1, and .NET Framework (the in-box C# compiler). No downloads, no
-  admin.
-- **Target (managed) box:** .NET Framework 4.5+ (present by default on Windows
-  10/11). A run needs ~2x the installed footprint of transient disk (payload in
+  PowerShell 5.1, and MSVC `cl.exe` ("Desktop development with C++") to compile
+  the native stub. No downloads, no admin. (You can also build from a previous
+  `Publishes\InstallerV*\offline_installer` payload instead of re-running
+  `prepare_offline.bat`.)
+- **Target (managed) box:** PowerShell 5.1 + .NET Framework 4.5+ (for the
+  extraction script's `System.IO.Compression`) - present by default on Windows
+  10/11. A run needs ~2x the installed footprint of transient disk (payload in
   `%TEMP%` + the install tree); see `VALIDATION.md`.

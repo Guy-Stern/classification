@@ -7,44 +7,62 @@ manage and auto-update it.
 
 ## Mechanism
 
-A small C# launcher (`SilentSetupLauncher.cs`, compiled in-box - no external
-SDK, no admin) with the payload appended as an overlay:
+A small **native** launcher (`native_launcher.c`, compiled in-box with MSVC
+`cl.exe`) with the payload appended as an overlay:
 
 ```
-[ launcher.exe ][ payload.zip ][ int64 zipLength ][ magic "MCSFX001" ]
+[ native_launcher.exe ][ payload.zip ][ int64 zipLength ][ magic "MCSFX001" ]
 ```
 
 JARVIS runs `MaterialClassification_Silent_Setup.exe -InstallDir {INSTALL_DIR}`.
-The launcher parses `-InstallDir` itself, maps the ZIP with a read-only
-sub-stream (ZIP64, so the payload can exceed 4 GB - no temp copy), extracts it
-to a scratch temp dir, and runs `silent_install.ps1 -InstallDir <dir>`,
-returning that script's exit code.
+The native stub parses `-InstallDir`, then runs the embedded extraction script
+(`silent_extract.ps1`, UTF-16 base64 baked into the exe) via
+`powershell -EncodedCommand`, passing paths through environment variables. The
+script reads the exe as **data** through a read-only ZIP64 sub-stream (no temp
+copy), extracts the payload to a scratch temp dir, runs
+`silent_install.ps1 -InstallDir <dir>`, and returns that script's exit code.
 
-We chose this over a 7-Zip SFX after empirically confirming the 7-Zip
-console/GUI SFX modules cannot take a redirectable install dir: unknown args
-make them error out (exit 7) without running, and the native `-o` switch
-extracts but skips `RunProgram`. The custom launcher owns argument parsing and
-the exit code end to end.
+Two design decisions, both forced by testing:
+
+- **Native, not a 7-Zip SFX.** The 7-Zip console/GUI SFX modules cannot take a
+  redirectable install dir: unknown args make them error out (exit 7) without
+  running, and the native `-o` switch extracts but skips `RunProgram`. A stub we
+  control owns argument parsing and the exit code end to end.
+- **Native, not managed (.NET).** A managed (C#) launcher works for small
+  payloads but Windows **cannot LAUNCH a managed exe carrying a >4 GB overlay**
+  (the CLR loader chokes: "not a valid application for this OS platform" -
+  observed on the real 18 GB build). A native PE ignores the overlay entirely,
+  so the 18 GB single-file exe launches fine; the extraction runs in PowerShell,
+  which reads the file as data, not through the PE loader.
 
 Clause letters match the contract table.
 
 | Clause | Requirement | How this installer satisfies it |
 |---|---|---|
-| **(a) Silent** | Fully unattended, no windows/prompts | The launcher runs with `CreateNoWindow=true` and starts `powershell.exe -NonInteractive -File silent_install.ps1`. No WinForms, no `Read-Host`, no `pause` in the silent path. |
-| **(b) Redirectable** | A flag sets the install dir; the whole tree lands there | `install_args = -InstallDir {INSTALL_DIR}`. The launcher parses it and passes it on; the installer puts `.venv` + app + models entirely under it. The payload extracts to a scratch temp dir, never into the install dir. |
-| **(d) No admin** | Per-user, no UAC | Plain console exe, no elevation manifest; `silent_install.ps1` makes no HKLM/Program Files/PATH writes. Installs wherever `-InstallDir` points. |
-| **(e) Synchronous + honest exit code** | `0` only on full success, non-zero on any failure; `3010` counts as failure | `silent_install.ps1` `exit 0` only at the end after a smoke check; **every pip failure is fatal** (`Invoke-Native` throws -> `exit 1`), not a warning. The launcher `WaitForExit()`s and returns `proc.ExitCode`. No reboot is ever required. |
+| **(a) Silent** | Fully unattended, no windows/prompts | The native stub launches PowerShell with `CREATE_NO_WINDOW`; extraction + `silent_install.ps1` run `-NonInteractive`. No WinForms, no `Read-Host`, no `pause` in the silent path. |
+| **(b) Redirectable** | A flag sets the install dir; the whole tree lands there | `install_args = -InstallDir {INSTALL_DIR}`. The stub parses it and passes it on; the installer puts `.venv` + app + models entirely under it. The payload extracts to a scratch temp dir, never into the install dir. |
+| **(d) No admin** | Per-user, no UAC | Plain native console exe, no elevation manifest; `silent_install.ps1` makes no HKLM/Program Files/PATH writes. Installs wherever `-InstallDir` points. |
+| **(e) Synchronous + honest exit code** | `0` only on full success, non-zero on any failure; `3010` counts as failure | `silent_install.ps1` `exit 0` only at the end after a smoke check; **every pip failure is fatal** (`Invoke-Native` throws -> `exit 1`), not a warning. The stub `WaitForSingleObject`s and returns the child's exit code (`GetExitCodeProcess`). No reboot is ever required. |
 | **(f) Deterministic** | Re-run reproduces a working install | Offline wheels (`--no-index`), pinned payload; a second run into a fresh dir reproduces the same tree. |
 | **(g) Re-runnable / idempotent** | Re-running re-establishes this version's state | Required because `self_contained:false`. Re-run reuses an existing `.venv`, pip skips satisfied packages, app code is re-copied with `-Force`, and `app_config.json` / `shapefile_config.json` are **preserved** (the `preserve` list). |
 
-## Why `self_contained: false`
+## Why `self_contained: false` + the shared-data split
 
 Per contract section 3, `material_classification` is the activation-profile
 example: it carries per-box operator config (`app_config.json` ->
 `sam3_local_dir`, `hf_cache_dir`; `shapefile_config.json`). The installer
 **never overwrites** those two files on a re-run, and they are declared in
-`preserve` so JARVIS keeps the box-local copy across updates. Model weights are
-bundled in-folder, so the `false` classification is conservative-safe.
+`preserve` so JARVIS keeps the box-local copy across updates.
+
+**The 4 GB exe limit forces the split.** A single `.exe` above 4 GiB cannot be
+launched by Windows (verified: 3.9 GB launches, 4.1 GB fails with "not a valid
+application for this OS platform"). The full offline payload is ~17 GB, so the
+heavy, version-stable data — pip wheels + model weights (HF cache + SAM3) — lives
+in a **shared per-box dir** provisioned once (`provision_shared.ps1`), and the
+managed installer (~170 MB: bundled Python + app code) builds the venv from the
+shared wheels and points `app_config` at the shared weights. This shared mutable
+state is exactly what the `false` (activation) profile manages: single active
+version, serialized switch, prefetch disabled, per-box config preserved.
 
 ## The build-time self-test (already run, PASSED)
 
@@ -65,15 +83,20 @@ the scratch dir.
 
 ## Disk note
 
-The launcher extracts the full payload to `%TEMP%` before installing, so a run
-needs roughly **2x the installed footprint transiently** (payload in `%TEMP%` +
-the tree in the install dir), on top of the contract's keep-2 baseline. Ensure
-the worker has that headroom; the scratch dir is deleted when the launcher exits.
+The installer itself is small (~170 MB) and extracts to `%TEMP%` briefly. The
+real disk cost is the **per-version `.venv`** it builds (torch + SAM3 deps,
+~6 GB) in the install dir, plus the **one-time shared data** (~15 GB at
+`C:\JARVIS\shared\material_classification`). The shared data is provisioned once
+and reused by every version, so subsequent versions only add another ~6 GB venv.
 
-## Target prerequisite
+## Prerequisites
 
-.NET Framework 4.5+ (for `System.IO.Compression` in the launcher). Present by
-default on every Windows 10/11 box - not an extra install.
+- **Build machine:** MSVC `cl.exe` (Visual Studio / Build Tools, "Desktop
+  development with C++") to compile the native stub, plus PowerShell 5.1. The
+  build finds `vcvars64.bat` automatically.
+- **Target (managed) box:** PowerShell 5.1 + .NET Framework 4.5+ (for
+  `System.IO.Compression`, used by the extraction script) - present by default on
+  every Windows 10/11 box. The native stub itself needs nothing extra.
 
 ## Clean-box end-to-end test (do this on a fresh VM before the first release)
 

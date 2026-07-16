@@ -67,8 +67,8 @@ function Resolve-Version {
 if (-not $Version) { $Version = Resolve-Version }
 Write-Host "[make-recipe] version = $Version"
 
-# -- Footprint ----------------------------------------------------------------
-$footprint = 20000000000  # ~20 GB safe default (measured ~18.8 GB, rounded up)
+# -- Footprint (the VERSIONED tree only: .venv + code; weights are shared) -----
+$footprint = 7000000000  # ~7 GB safe default; measure a real install and re-release
 if ($InstallSample -and (Test-Path -LiteralPath $InstallSample)) {
     Write-Host "[make-recipe] measuring footprint of $InstallSample ..."
     $sum = (Get-ChildItem -LiteralPath $InstallSample -Recurse -File -Force -ErrorAction SilentlyContinue |

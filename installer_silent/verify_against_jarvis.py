@@ -36,7 +36,7 @@ from agent.installer_runner import run_installer, InstallerError   # noqa: E402
 from agent import tool_manager as TM                               # noqa: E402
 from server.routers.tools import VersionCreate, _validate_recipe, _resolve_packaging  # noqa: E402
 
-LAUNCHER = CLASS / "_build_tools" / "SilentSetupLauncher.exe"
+LAUNCHER = CLASS / "_build_tools" / "native_launcher.exe"
 REAL_PS1 = CLASS / "installer_silent" / "silent_install.ps1"
 MAGIC = b"MCSFX001"
 INSTALLER_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
@@ -173,13 +173,19 @@ def main():
     if not PY311.joinpath("python.exe").exists():
         print(f"  SKIP  no full Python 3.11 at {PY311}")
     else:
+        # Installer payload (code only) + bundled Python (junction).
         payload = base / "realpayload"
         (payload / "app").mkdir(parents=True)
-        (payload / "offline_packages").mkdir()
         (payload / "assets").mkdir()
         (payload / "app" / "requirements.txt").write_text("numpy\n", encoding="utf-8")
         (payload / "prerequisites").mkdir()
         link = payload / "prerequisites" / "python311"
+        # Shared data dir with EMPTY wheel dirs -> passes the shared-dir check but
+        # core pip fails offline, exercising venv + sitecustomize + the fatal path.
+        shared = base / "realshared"
+        (shared / "offline_packages").mkdir(parents=True)
+        (shared / "offline_packages_torch").mkdir()
+        (shared / "sam3").mkdir()
         j = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(PY311)], capture_output=True, text=True)
         if j.returncode != 0:
             print("  SKIP  could not create junction:", j.stderr.strip())
@@ -188,14 +194,15 @@ def main():
                 idir = base / "realinstall"; idir.mkdir()
                 r = subprocess.run(
                     ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                     "-File", str(REAL_PS1), "-InstallDir", str(idir), "-PayloadDir", str(payload)],
+                     "-File", str(REAL_PS1), "-InstallDir", str(idir), "-PayloadDir", str(payload),
+                     "-SharedDir", str(shared)],
                     capture_output=True, text=True, timeout=300)
                 venv_py = idir / ".venv" / "Scripts" / "python.exe"
                 sc = idir / ".venv" / "Lib" / "site-packages" / "sitecustomize.py"
                 check("real ps1 created a working .venv", venv_py.is_file())
                 check("real ps1 wrote the OpenMP-guard sitecustomize.py",
                       sc.is_file() and "KMP_DUPLICATE_LIB_OK" in sc.read_text(encoding="utf-8", errors="ignore"))
-                check("real ps1 exits NON-ZERO when a required wheel is missing (clause e)",
+                check("real ps1 exits NON-ZERO when a shared wheel is missing (clause e)",
                       r.returncode != 0, f"exit={r.returncode}")
             finally:
                 # Remove the junction with rmdir (link only, never the target) BEFORE rmtree.

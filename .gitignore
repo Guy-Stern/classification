@@ -35,6 +35,9 @@ _build_tools/silent_payload.zip
 _build_tools/silent_selftest/
 _build_tools/selftest*.zip
 _build_tools/selftest_sink.txt
+_build_tools/native_launcher.gen.c
+_build_tools/native_launcher.gen.obj
+_build_tools/compile_native.bat
 # Generated per-version release recipe + silent installer (build output)
 /recipe.json
 MaterialClassification_Silent_Setup.exe
