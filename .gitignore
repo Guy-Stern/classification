@@ -29,6 +29,15 @@ Resources.zip
 # Large binaries (offline installer assets, model weights, build payloads)
 _build_tools/payload.7z
 _build_tools/7zextra.7z
+# Silent-installer build scratch (launcher exe, payload zip, self-test artifacts)
+_build_tools/silent_payload/
+_build_tools/silent_payload.zip
+_build_tools/silent_selftest/
+_build_tools/selftest*.zip
+_build_tools/selftest_sink.txt
+# Generated per-version release recipe + silent installer (build output)
+/recipe.json
+MaterialClassification_Silent_Setup.exe
 offline_installer/offline_packages/
 offline_installer/offline_packages_gpu/
 offline_installer/offline_packages_torch/
