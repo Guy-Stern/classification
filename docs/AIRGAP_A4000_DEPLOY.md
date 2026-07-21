@@ -20,6 +20,38 @@ Everything the shared data needs already exists in a full publish
 (`Publishes\InstallerV19`): `offline_installer\offline_packages*`,
 `offline_installer\app\models\{hf_cache,sam3}`, and `sam3_runtime\`.
 
+> **The installer is NOT standalone — do not ship it alone.** It carries no
+> wheels and no model weights. Without the shared data provisioned (step B0) it
+> **fails fast with exit 1** ("Shared data dir not found" / "missing wheels dir")
+> — by design, per the honest-exit-code clause. Both parts must reach the box.
+
+### Where the bytes actually are
+
+Why the installer is only ~170 MB while the delivery is ~18 GB. The payload ZIP
+inside the exe is **stored, not compressed** (`CompressionLevel::NoCompression`
+in `build_silent_installer.ps1` — the bytes are already compressed), so the exe
+size is ≈ the sum of what it bundles:
+
+| Inside `MaterialClassification_Silent_Setup.exe` (~168 MiB) | Size |
+|---|---|
+| `prerequisites\python311\` — full venv-capable Python 3.11 | 164 MB |
+| App code — `backend\`, `web_app\`, `cli.py`, + the two ~6.8 MB PyInstaller exes | ~14 MB |
+
+| In `Publishes\InstallerV19\` (~18 GB — carried separately, never in the exe) | Size |
+|---|---|
+| `offline_installer\app\models\sam3` — SAM3 weights | 6.5 GB |
+| `offline_installer\app\models\hf_cache` — HF cache | 5.1 GB |
+| `offline_installer\offline_packages` — core wheels | 2.7 GB |
+| `offline_installer\offline_packages_torch` — torch wheels | 2.4 GB |
+| `offline_installer\offline_packages_gpu` — CuPy/NVIDIA pack (`-Gpu` only) | 567 MB |
+| `offline_installer\prerequisites` — Python 3.11 (the only piece also in the exe) | 164 MB |
+
+Third number worth planning disk for: the **per-version install footprint is
+~6.8 GB** (`install_footprint_bytes` in `recipe.json`) — the `.venv`, mostly
+torch, plus the copied `python311\` base. That is paid **per installed version**,
+not once, and it is separate from both the ~170 MB artifact and the ~15 GB
+shared data. Three versions on a box ≈ 15 GB shared + ~20 GB of venvs.
+
 ---
 
 ## A. Build the lean installer (dev/build box)

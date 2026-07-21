@@ -30,6 +30,19 @@ bootstrap that builds each version's venv from those shared wheels and points
 convention from the install dir (`<jarvis_root>\shared\material_classification`),
 or via the `MC_SHARED_DIR` env var. See `AIRGAP_A4000_DEPLOY.md`.
 
+**The artifact is not standalone.** The ~170 MB exe is only bundled Python 3.11
+(164 MB) + app code (~14 MB) — no wheels, no weights. Without the shared data it
+exits **1** at the pre-flight check in `silent_install.ps1`. Three sizes not to
+conflate, whoever is wiring this into JARVIS:
+
+| | Size | Paid |
+|---|---|---|
+| The artifact JARVIS downloads | ~170 MB | per version, over the wire |
+| Shared data (`provision_shared.ps1`) | ~15 GB | **once per box**, out of band |
+| Install footprint (`.venv` + code) | ~6.8 GB | **per installed version** |
+
+`AIRGAP_A4000_DEPLOY.md` has the full per-directory accounting.
+
 ## How it's wired into publishing ("every version")
 
 `publish.ps1` (root, `publish.bat` launcher) is the one command that publishes a
