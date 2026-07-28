@@ -54,6 +54,14 @@ SYNC_PAIRS: List[Tuple[str, List[str]]] = [
     ("backend/app/mosaic_builder.py", [
         "offline_installer/app/backend/app/mosaic_builder.py",
     ]),
+    # CDB Raster Material export (CMIX raster + cell-wide CMT) consumed by cdb-build
+    ("backend/app/rm_export.py", [
+        "offline_installer/app/backend/app/rm_export.py",
+    ]),
+    # PROJ data-dir pinning — stdlib-only, imported by core.py AND cli.py
+    ("backend/app/proj_setup.py", [
+        "offline_installer/app/backend/app/proj_setup.py",
+    ]),
     ("backend/app/shapefile_config.py", [
         "offline_installer/app/backend/app/shapefile_config.py",
     ]),
