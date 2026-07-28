@@ -90,7 +90,12 @@ $recipe = [ordered]@{
     artifact_path           = $artifact
     packaging               = 'installer'          # explicit, never derived
     entry                   = 'MaterialClassification_CLI.exe'
-    install_args            = '-InstallDir {INSTALL_DIR}'
+    # -Gpu installs the CuPy/NVIDIA CUDA 12.4 pack from the shared
+    # offline_packages_gpu. Without it every managed install silently runs
+    # CPU-only (core._probe_acceleration finds no CuPy -> faiss-cpu/sklearn).
+    # Step 7 of silent_install.ps1 is non-fatal, so this is safe on a box with
+    # no NVIDIA GPU - it just costs ~800 MB of unused wheels.
+    install_args            = '-InstallDir {INSTALL_DIR} -Gpu'
     install_footprint_bytes = $footprint
     self_contained          = $false
     preserve                = @('app_config.json', 'shapefile_config.json')

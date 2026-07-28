@@ -298,6 +298,38 @@ start "" http://127.0.0.1:8000
         $env:PYTHONPATH = $InstallDir
         Invoke-Native -Exe $venvPy -What 'import torch + backend.app.core' -Arguments @(
             '-c', 'import torch, numpy, rasterio, sklearn; import backend.app.core') | Out-Null
+
+        # Acceleration check. core._probe_acceleration only PRINTS its verdict on
+        # import, so a GPU install that silently degraded to CPU used to look
+        # identical in the log to a good one - that is how 1.0.0 shipped
+        # CPU-only unnoticed. Assert the engine here instead. Non-fatal: a CPU
+        # fallback still classifies correctly, just slowly, and refusing to
+        # install over it would be worse than saying so loudly.
+        # Test the ENGINE name, not the gpu flag: _probe_acceleration returns
+        # _GPU_AVAILABLE as its second element even for the faiss-cpu/sklearn
+        # engines, so a box with a working GPU but no CuPy still reports
+        # GPU=True while computing entirely on the CPU.
+        $probe = '
+import backend.app.core as c
+e, gpu, info = c._probe_acceleration()
+accel = e in ("faiss-gpu", "cupy", "cuml")
+print("ENGINE=%s ACCELERATED=%s %s" % (e, accel, info or ""))
+'
+        $engineOut = & $venvPy -c $probe 2>&1
+        $engineLine = ($engineOut | Select-String -Pattern '^ENGINE=' | Select-Object -First 1)
+        if ($engineLine) {
+            Write-Log ("acceleration: {0}" -f $engineLine.ToString().Trim())
+            if ($Gpu -and $engineLine -notmatch 'ACCELERATED=True') {
+                Write-Log ("WARNING: -Gpu was requested but the KMeans engine resolved to " +
+                           "CPU. Classification will be several times slower. Usual causes: " +
+                           "the NVIDIA driver is older than the CUDA 12.4 wheels expect, no " +
+                           "NVIDIA GPU on this box, or offline_packages_gpu was incomplete " +
+                           "in the shared dir.") 'WARN'
+            }
+        }
+        else {
+            Write-Log 'WARNING: could not determine the KMeans acceleration engine.' 'WARN'
+        }
     }
     finally { Pop-Location }
 
