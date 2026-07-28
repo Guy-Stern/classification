@@ -1,15 +1,18 @@
 # Architecture
 
-High-level map of how the classification project's pieces fit together. For
-operational commands see [../RUNNING_GUIDE.md](../RUNNING_GUIDE.md);
-for deployment see [../STANDALONE_DEPLOYMENT.md](../STANDALONE_DEPLOYMENT.md).
+High-level map of how the classification project's pieces fit together. For a guided
+introduction start at [../ONBOARDING.md](../ONBOARDING.md); for operational commands see
+[../RUNNING_GUIDE.md](../RUNNING_GUIDE.md); for deployment see
+[../STANDALONE_DEPLOYMENT.md](../STANDALONE_DEPLOYMENT.md).
 
-The graphify knowledge graph at [../graphify-out/](../graphify-out/) was used to
-identify the "god nodes" and community structure summarised below.
+> The "god nodes" table below came from a graphify knowledge graph at `graphify-out/`.
+> **That directory no longer exists** (lost in the May-2026 deletion incident) and graphify
+> is not installed, so the edge counts are a point-in-time snapshot, not live data. Read
+> the source directly.
 
 ---
 
-## God Nodes (most-connected functions)
+## God Nodes (most-connected functions — snapshot, pre-phase-6)
 
 | Node | Edges | Where |
 |------|-------|-------|
@@ -55,6 +58,8 @@ identify the "god nodes" and community structure summarised below.
 │   ├── /raster-info, /raster-as-png, /list-dir, /scan-folder                 │
 │   ├── /suggest-tile-size, /gpu-info, /app-config, /set-sam3-path …          │
 │   │                                                                         │
+│   ├── pipeline.py    ← classify_v6 — THE orchestrator every entry point     │
+│   │                    funnels into: mask acquire → KMeans → fuse → XML     │
 │   ├── core.py        ← classify_and_export, rasterize_vectors,              │
 │   │                    train_kmeans_model, build_shared_color_table,        │
 │   │                    suggest_tile_size, _classify_tile_worker,            │
@@ -62,8 +67,19 @@ identify the "god nodes" and community structure summarised below.
 │   │                    _write_composite_material_xml, .txr/.txs writers    │
 │   ├── road_extraction.py  ← extract_roads / extract_feature_masks /         │
 │   │                          merge_*, FEATURE_CONFIGS                       │
+│   ├── shapefile_config.py / shapefile_resolver.py  ← GIS mask sources       │
+│   ├── sde_extractor.py + sde_arcpy_worker.py  ← Esri SDE via arcpy subproc  │
+│   ├── manifest.py / geocell.py / mosaic_catalog.py / mosaic_builder.py      │
+│   │                    ← geocell manifest mode (CLI only, see below)        │
 │   ├── config.py      ← persistent JSON app config                           │
 │   └── mea_profile.py ← reads %ProgramData%\…\mea_calibration_profile.json   │
+└────────────────────────────────────────────────────────────────────────────┘
+            ▲
+            │  same core + pipeline, no HTTP
+            │
+┌────────────────────────────────────────────────────────────────────────────┐
+│  cli.py  (also shipped as MaterialClassification_CLI.exe)                    │
+│   file / folder-batch / --manifest geocell modes                             │
 └────────────────────────────────────────────────────────────────────────────┘
             ▲
             │  reads
@@ -90,7 +106,6 @@ raster.tif ──► classify_and_export()  ──►  classified.tif (RGB)
                                             └─► <stem>.xml (MEA only)
                                             └─► <stem>.txr / .txs (MEA only)
                                             └─► EPSG:4326 reprojection
-                                            └─► power-of-2 padding
 
 classified.tif + vectors ──► rasterize_vectors_onto_classification() ──► merged.tif
 ```
@@ -100,6 +115,95 @@ compatibility with the Tkinter app and `cli.py`.
 
 The `/classify` endpoint runs the full pipeline; `/classify-step1` runs step 1 only;
 `/classify-step2` runs step 2 only on an existing classification.
+
+> Outputs used to be padded to power-of-2 **dimensions** for an old texture-engine
+> assumption. Removed in `fd055ff` — it produced a black L-shaped strip on every output.
+> Only the *tile size* is power-of-2 now, never the raster itself.
+
+---
+
+## `classify_v6` — the MEA orchestrator
+
+[../backend/app/pipeline.py](../backend/app/pipeline.py). Every MEA run — web app, CLI,
+manifest mode — goes through this. It sits *above* the two-step core pipeline.
+
+```
+                     ┌──────────────────────────────────────────────┐
+   raster.tif ─────► │ Phase 1  ACQUIRE MASKS  (_acquire_mask)      │
+                     │   water  ← water_mask GeoTIFF (band 1 > 0)   │
+                     │   roads  ← SDE (buffered) → SAM3 → empty     │
+                     │   bldgs  ← SDE → SAM3 → empty                │
+                     └──────────────────┬───────────────────────────┘
+                     ┌──────────────────▼───────────────────────────┐
+   raster.tif ─────► │ Phase 2  KMEANS on source="kmeans" classes   │
+                     │   _split_classes_by_source() filters the list│
+                     │   core.classify_and_export() does the work   │
+                     │   Hungarian 1:1 cluster→material assignment  │
+                     └──────────────────┬───────────────────────────┘
+                     ┌──────────────────▼───────────────────────────┐
+                     │ Phase 3  FUSE: water → roads → buildings     │
+                     │   later masks win on overlap                 │
+                     │   soft-prior veto DISABLED (thresholds >1.0) │
+                     └──────────────────┬───────────────────────────┘
+                     ┌──────────────────▼───────────────────────────┐
+                     │ Phase 4  Rewrite XML with all 6 materials    │
+                     └──────────────────┬───────────────────────────┘
+                                        ▼
+                        classified.tif + .xml + .txr / .txs
+```
+
+Two invariants worth internalising:
+
+- **Mask-source classes never enter a KMeans model.** They have no useful spectral
+  signature and poison cluster assignment for everything else. `_split_classes_by_source()`
+  exists to enforce this; ignoring it caused a production bug where batch outputs came back
+  almost entirely water (`240c4ca`).
+- **Masks are authoritative.** `_VETO_THRESHOLDS` in `pipeline.py` are all set above 1.0,
+  which disables the veto. A shapefile or SAM3 detection always paints, even if the
+  underlying RGB looks like vegetation.
+
+---
+
+## Geocell manifest mode (CLI only)
+
+`cli.py --manifest geocell.toml`. One TOML = one OGC CDB geocell = one `classify_v6` run.
+Instead of a single input raster, the manifest declares **priority layers** of source
+imagery.
+
+```
+geocell.toml
+    │  manifest.py     validate (pydantic, extra="forbid")
+    ▼
+GeocellManifest ──► geocell.py       CDB cell math → WGS-84 bounds, name (N33E035)
+    │                                 west_lon must snap to the lat-zone width
+    ▼
+mosaic_catalog.py    discover *.tif / *.tiff / *.jp2 per layer
+    │                intersect footprints with the cell, drop non-overlapping
+    ▼
+mosaic_builder.py    reproject each source to the target grid via WarpedVRT
+    │                composite PRIORITY LAST-WINS (priority 1 written last)
+    │                near-black pixels (mean RGB < 8) excluded from validity
+    │                MAX_MOSAIC_SIDE_PX=20000 caps the grid, coarsening GSD if needed
+    ▼
+<cell>_mosaic.tmp.tif  ──► classify_v6(tile_mode=True, tile_max_pixels=512²,
+    │                                   tile_name_stem=<cell>)
+    ▼
+<cell>_classified_tiles/   N33E035_tile_r{row}_c{col}.tif + .xml + .txr
+```
+
+Design decisions that are easy to misread as bugs:
+
+- **Output is always a folder**, never the `[output].path` file. Tiling is forced so the
+  deliverable shape is deterministic regardless of the worker's free RAM; the overwrite
+  guard therefore checks the `_classified_tiles/` directory, not the `.tif`.
+- **Tile names derive from the cell name**, not the temp mosaic's stem — so the same
+  manifest yields byte-identical filenames across runs (requeue reproducibility).
+- **Priority direction matches QGIS/Photoshop**: lower number = on top. Flat `sources`
+  entries composite *below* every `[[layers]]` entry.
+- The mosaic build is currently **full-frame in RAM**. On a constrained box this is the
+  ceiling for a full 1° cell — see Bug 4 in
+  [MC_MANIFEST_BUGS_2026-07-12.md](MC_MANIFEST_BUGS_2026-07-12.md); the windowed rewrite
+  is on the open PR #4 branch.
 
 ---
 
@@ -174,7 +278,14 @@ settings, classification result, progress events, …
 - New post-processing step: insert in `classify_and_export()` between
   *Pixel assignment* and *Saving output* phases (see `_PHASE_WEIGHTS` in
   [backend/app/main.py](../backend/app/main.py)).
-- New MEA material: edit [shared/mea_classes.json](../shared/mea_classes.json),
-  [shared/mea_defaults.json](../shared/mea_defaults.json),
-  [web_app/src/constants/mea.ts](../web_app/src/constants/mea.ts), and
-  `MEA_CLASSES` / `_MEA_COMPOSITE_NAMES` in `core.py`.
+- New MEA material: edit `MEA_CLASSES` / `_MEA_COMPOSITE_NAMES` in `core.py`,
+  [shared/mea_defaults.json](../shared/mea_defaults.json) (anchors), and
+  [web_app/src/constants/mea.ts](../web_app/src/constants/mea.ts). Decide `source` first —
+  `"kmeans"` needs anchor colors that separate cleanly from the existing ones; `"mask"`
+  needs a mask source wired into `pipeline.py::_acquire_mask`.
+  (`shared/mea_classes.json` is the legacy 13-class list and is **not** read by any code.)
+- New geocell manifest field: [backend/app/manifest.py](../backend/app/manifest.py). Every
+  model sets `extra="forbid"`, so an unknown table is a hard error by design.
+
+**After any of these, run `tools/sync_mirrors.py`** — `offline_installer/app/` is a
+byte-identical mirror and drift there has caused shipped-product bugs before.

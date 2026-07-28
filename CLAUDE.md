@@ -44,6 +44,17 @@ Orthophoto material-classification web app. React + TypeScript + Vite frontend +
 ### XML export
 After every MEA classification, `_write_composite_material_xml` writes a `<stem>.xml` next to the output. Format: `<Composite_Material_Table>` with `<Composite_Material index="N">` entries. Colors ARGB (`#ff` + hex). Composite names from `_MEA_COMPOSITE_NAMES` (e.g. `BM_VEGETATION` → `GENVEGETATION`).
 
+### CDB Raster Material export (`backend/app/rm_export.py`)
+Every CLI run (manifest **and** positional) also emits `<stem>_rm.tif` + `<stem>_rm.xml` — the pair `cdb-build` (the IER repo at `C:\work\IER`, installed at `C:\cdb-build`) consumes in its `[raster_material]` manifest section.
+
+- `_rm.tif` — **1-band uint8** CMIX raster, EPSG:4326, whole geocell, **no `nodata` tag**.
+- `_rm.xml` — one **cell-wide** CMT with `DEFAULT` at **index 0** (`BM_SOIL` @ 100) and the 6 MEA classes at fixed indices 1–6. Index 0 is mandatory: cdb-build fills uncovered pixels with CMIX 0 and hard-fails if it has no CMT entry.
+- Indices come from inverting the paint step (`core._apply_color_table` LUT + `pipeline._fuse_with_priors_and_veto` hard-assign + nearest-neighbour reprojection ⇒ classified rasters only ever hold exact palette colours or black). A non-palette colour is logged loudly; `strict=True` raises.
+- Sourced from `_classified_tiles/`, **never** `_with_vectors_tiles/` (vector overlays use deliberately non-palette colours).
+- Export failure never fails the run — it warns and the CLI still exits 0.
+
+Tests: `tests/test_rm_export.py` (unit) and `tests/test_rm_export_integration.py` (E2E through the real `cdb-build`, auto-skipped if it is not installed). Run with `.venv/Scripts/python.exe -m pytest`; add `-m "not slow"` to skip the subprocess runs.
+
 ### Environment
 
 **ALWAYS use `.venv/Scripts/python.exe` for this project.**

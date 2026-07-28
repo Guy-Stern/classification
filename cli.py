@@ -229,6 +229,19 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# Pin PROJ before anything touches a CRS. Manifest mode reads source footprints
+# in mosaic_catalog *before* backend.app.core (which does its own pinning) is
+# ever imported, so without this a box whose PROJ_LIB points at a system
+# PostGIS/ArcGIS proj.db fails at catalog time with a layout-version error.
+# proj_setup is stdlib-only, so this costs nothing and pulls in no torch.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from backend.app.proj_setup import setup_proj_lib
+
+    setup_proj_lib()
+except Exception as _proj_err:  # never block the CLI on PROJ discovery
+    print(f"[PROJ] WARNING: could not pin PROJ data dir: {_proj_err}")
+
 # Force UTF-8 for stdout/stderr on Windows so print() with box-drawing
 # characters, arrows, etc. doesn't throw UnicodeEncodeError under cmd.exe's
 # default cp1252 codec. Matches backend/app/main.py top-of-file setup so
@@ -385,6 +398,10 @@ def run_single(
         if result.get("status") != "ok":
             return result
 
+        # CDB Raster Material pair, derived from the v6 output *before* any
+        # vector overlay — the overlay paints non-palette colours on purpose.
+        _emit_rm_pair(result.get("outputPath") or output_path, output_path, classes)
+
         # step1 = classification only; full = classification + vector overlay
         if args.step == "full" and vector_layers:
             v6_output = result.get("outputPath")
@@ -423,6 +440,31 @@ def derive_output(input_path: Path, output_arg: str, suffix: str, input_root: Pa
         # If output has no suffix, treat as directory-like
         return str(out)
     return str(input_path.parent / (input_path.stem + suffix + ".tif"))
+
+
+def _emit_rm_pair(source, out_stem, classes):
+    """Emit the CDB Raster Material pair (`<stem>_rm.tif` + `<stem>_rm.xml`).
+
+    *source* is the classified deliverable (a tile folder or a single .tif);
+    *out_stem* names the pair, following the same `[output].path`-stem rule the
+    `_classified_tiles` folder uses, so the pair sits beside it.
+
+    Deliberately never raises: the RM pair is an *additional* deliverable, and a
+    failure to derive it must not turn a completed classification into a failed
+    run. Problems are printed and the exit code stays 0.
+    """
+    try:
+        from backend.app.rm_export import export_rm_pair, summarize
+        info = export_rm_pair(source, out_stem, classes)
+        if info is None:
+            print(f"  [RM] no classified tiles under {source}; RM pair not written")
+            return None
+        print(summarize(info, classes))
+        return info
+    except Exception as e:
+        print(f"  [RM] WARNING: RM export failed ({type(e).__name__}: {e}). "
+              f"The classification output above is unaffected.")
+        return None
 
 
 def run_manifest(manifest_path: str):
@@ -566,6 +608,15 @@ def run_manifest(manifest_path: str):
 
     if result.get("status") == "ok":
         print(f"OK Saved (tiled folder): {result.get('outputPath') or out_path}")
+        # CDB Raster Material pair for the downstream cdb-build [raster_material]
+        # section. Sourced from _classified_tiles (never _with_vectors_tiles: the
+        # vector overlay paints deliberately non-palette colours, which are
+        # visualisation, not materials).
+        _emit_rm_pair(
+            out_path.with_name(out_path.stem + "_classified_tiles"),
+            out_path,
+            MEA_CLASSES,
+        )
         sys.exit(0)
     print(f"FAIL: {result.get('message', str(result))}")
     sys.exit(1)

@@ -11,102 +11,17 @@ from rasterio.windows import Window
 from rasterio.windows import transform as window_transform
 from rasterio.transform import array_bounds
 
-# Configure PROJ library for geopandas/rasterio BEFORE importing geopandas
-# This fixes "PROJ: proj_identify: Cannot find proj.db" errors
-def _setup_proj_lib():
-    """Setup PROJ_LIB environment variable for geopandas/rasterio"""
-    def _layout_minor(proj_dir: Path) -> Optional[int]:
-        try:
-            import sqlite3
-            db_path = proj_dir / 'proj.db'
-            if not db_path.exists():
-                return None
-            con = sqlite3.connect(str(db_path))
-            cur = con.execute(
-                "select value from metadata where key='DATABASE.LAYOUT.VERSION.MINOR'"
-            )
-            row = cur.fetchone()
-            return int(row[0]) if row else None
-        except Exception:
-            return None
+# Configure PROJ library for geopandas/rasterio BEFORE importing geopandas.
+# This fixes "PROJ: proj_identify: Cannot find proj.db" errors and the
+# layout-version clash with a system PostGIS/ArcGIS PROJ. The implementation
+# lives in proj_setup (stdlib-only) so light entry points like cli.py can pin
+# PROJ without importing this module's torch/sklearn chain.
+try:
+    from backend.app.proj_setup import setup_proj_lib
+except ImportError:  # running with backend/app on sys.path (frozen exe layout)
+    from proj_setup import setup_proj_lib
 
-    def _add_if_exists(paths: List[Path], value: Optional[Path]):
-        if value and value.exists() and value not in paths:
-            paths.append(value)
-
-    def _collect_site_packages() -> List[Path]:
-        discovered: List[Path] = []
-        try:
-            for path_str in site.getsitepackages():
-                p = Path(path_str)
-                if p.exists() and p not in discovered:
-                    discovered.append(p)
-        except Exception:
-            pass
-
-        try:
-            user_site = site.getusersitepackages()
-            if user_site:
-                p = Path(user_site)
-                if p.exists() and p not in discovered:
-                    discovered.append(p)
-        except Exception:
-            pass
-
-        try:
-            for path_str in sys.path:
-                p = Path(path_str)
-                if p.name.lower() in {"site-packages", "dist-packages"} and p.exists() and p not in discovered:
-                    discovered.append(p)
-        except Exception:
-            pass
-
-        return discovered
-
-    candidates: List[Path] = []
-
-    # Prefer bundled proj data in the active Python environment (layout >= 5).
-    for site_packages in _collect_site_packages():
-        _add_if_exists(candidates, site_packages / 'rasterio' / 'proj_data')
-        _add_if_exists(candidates, site_packages / 'pyogrio' / 'proj_data')
-
-    # Then pyproj's bundled data dir if compatible.
-    try:
-        from pyproj import datadir as _pyproj_datadir
-
-        pyproj_dir = _pyproj_datadir.get_data_dir()
-        if pyproj_dir:
-            _add_if_exists(candidates, Path(pyproj_dir))
-    except Exception:
-        pass
-
-    existing = os.environ.get('PROJ_LIB')
-    if existing:
-        _add_if_exists(candidates, Path(existing))
-
-    # Generic OS-level fallback if PROJ is installed system-wide.
-    for system_proj in [
-        Path('/usr/share/proj'),
-        Path('/usr/local/share/proj'),
-        Path('/opt/homebrew/share/proj'),
-        Path('C:/Program Files/PROJ/share/proj'),
-    ]:
-        _add_if_exists(candidates, system_proj)
-
-    for proj_dir in candidates:
-        if not proj_dir.exists():
-            continue
-        layout_minor = _layout_minor(proj_dir)
-        if layout_minor is None:
-            continue
-        if layout_minor >= 5:
-            os.environ['PROJ_LIB'] = str(proj_dir)
-            print(f"[PROJ] Set PROJ_LIB to: {proj_dir} (layout {layout_minor})")
-            return
-
-    print(f"[PROJ] WARNING: Could not find compatible proj.db (layout >= 5)")
-
-_setup_proj_lib()
+setup_proj_lib()
 
 # ── GDAL / VSI I/O tuning (must come before any rasterio import) ────────────
 # Larger block-cache reduces tile re-reads; ALL_CPUS enables parallel
