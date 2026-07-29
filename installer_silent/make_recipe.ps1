@@ -71,11 +71,21 @@ Write-Host "[make-recipe] version = $Version"
 $footprint = 7000000000  # ~7 GB safe default; measure a real install and re-release
 if ($InstallSample -and (Test-Path -LiteralPath $InstallSample)) {
     Write-Host "[make-recipe] measuring footprint of $InstallSample ..."
-    $sum = (Get-ChildItem -LiteralPath $InstallSample -Recurse -File -Force -ErrorAction SilentlyContinue |
+    # EXCLUDE models\: the sample (C:\ClassificationApp) is a legacy STANDALONE install
+    # that carries the HF cache + SAM3 weights, but a managed install is
+    # self_contained:false - the weights live once per box in -SharedDir and are never
+    # copied per version. Counting them tripled the estimate (6.1 -> 20.3 GB), and the
+    # agent's preflight needs footprint * _KEEP_VERSIONS (2), so a 20.3 GB recipe
+    # demands ~40 GB free and refuses to install on a box that has ample room.
+    $sample = (Resolve-Path -LiteralPath $InstallSample).Path
+    $sum = (Get-ChildItem -LiteralPath $sample -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notlike (Join-Path $sample 'models\*') } |
             Measure-Object -Property Length -Sum).Sum
     if ($sum -gt 0) {
-        # +8% headroom so the agent's disk preflight never under-counts.
-        $footprint = [int64]([math]::Ceiling($sum * 1.08))
+        # +8% headroom so the agent's disk preflight never under-counts. Floor at the
+        # safe default: under-counting risks a mid-install disk failure, and the sample
+        # may lack pieces a real managed install adds (the persisted python311 copy).
+        $footprint = [math]::Max($footprint, [int64]([math]::Ceiling($sum * 1.08)))
     }
 }
 Write-Host "[make-recipe] install_footprint_bytes = $footprint"

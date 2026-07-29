@@ -147,9 +147,13 @@ try {
         Write-Log ("Using bundled Python (copied to {0})" -f $persistPy)
     }
     else {
+        # NOTE: no double quotes inside these -c snippets. PS 5.1 does not escape
+        # embedded quotes when it builds a native command line, so `or ""` reached
+        # python as `or )` and the probe died with a SyntaxError - silently, thanks
+        # to the 2>$null below, so an existing system 3.11 was never detected.
         foreach ($probe in @(
                 @{ Exe = 'py';     Args = @('-3.11', '-c', 'import sys;print(sys.executable)') },
-                @{ Exe = 'python'; Args = @('-c', 'import sys;print(sys.version_info[:2]==(3,11) and sys.executable or "")') })) {
+                @{ Exe = 'python'; Args = @('-c', 'import sys;print(sys.executable if sys.version_info[:2]==(3,11) else str())') })) {
             try {
                 $out = (& $probe.Exe @($probe.Args) 2>$null | Select-Object -Last 1)
                 if ($LASTEXITCODE -eq 0 -and $out -and (Test-Path -LiteralPath $out)) { $py311 = $out.Trim(); break }
@@ -309,13 +313,31 @@ start "" http://127.0.0.1:8000
         # _GPU_AVAILABLE as its second element even for the faiss-cpu/sklearn
         # engines, so a box with a working GPU but no CuPy still reports
         # GPU=True while computing entirely on the CPU.
-        $probe = '
-import backend.app.core as c
-e, gpu, info = c._probe_acceleration()
-accel = e in ("faiss-gpu", "cupy", "cuml")
-print("ENGINE=%s ACCELERATED=%s %s" % (e, accel, info or ""))
-'
-        $engineOut = & $venvPy -c $probe 2>&1
+        #
+        # This probe runs from a temp .py FILE, never `python -c <inline>`. PS 5.1
+        # does not escape embedded double quotes when building a native command
+        # line, so the inline form arrived at python with every quote stripped
+        # ("cupy" -> cupy, "ENGINE=%s ..." -> ENGINE=%s ...) and died with
+        # SyntaxError on the print(). Under $ErrorActionPreference='Stop' the
+        # resulting stderr + 2>&1 raised NativeCommandError, which propagated to
+        # the outer catch and FAILED the whole install - after every real step had
+        # already succeeded. That is the 1.1.3 failure. Two independent guards
+        # now: a file (no quoting) and Continue (stderr can never be fatal here).
+        $probePy = Join-Path $InstallDir '_probe_accel.py'
+        Set-Content -LiteralPath $probePy -Encoding ASCII -Value @(
+            'import backend.app.core as c'
+            'e, gpu, info = c._probe_acceleration()'
+            'accel = e in ("faiss-gpu", "cupy", "cuml")'
+            'print("ENGINE=%s ACCELERATED=%s %s" % (e, accel, info or ""))')
+        $engineOut = $null
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $engineOut = & $venvPy $probePy 2>&1 }
+        catch { Write-Log ("acceleration probe raised: {0}" -f $_.Exception.Message) 'WARN' }
+        finally {
+            $ErrorActionPreference = $prevEap
+            Remove-Item -LiteralPath $probePy -Force -ErrorAction SilentlyContinue
+        }
         $engineLine = ($engineOut | Select-String -Pattern '^ENGINE=' | Select-Object -First 1)
         if ($engineLine) {
             Write-Log ("acceleration: {0}" -f $engineLine.ToString().Trim())

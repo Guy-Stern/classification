@@ -88,7 +88,19 @@ function Compile-NativeLauncher([string]$outExe) {
     # Embed silent_extract.ps1 as a UTF-16 base64 string for `powershell -EncodedCommand`.
     $psText = [System.IO.File]::ReadAllText($ExtractPs)
     $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($psText))
-    $cSrc = ([System.IO.File]::ReadAllText($LauncherC)).Replace('@@ENC@@', $enc)
+
+    # Split across adjacent string literals. MSVC caps a SINGLE literal at 16380
+    # bytes (C2026) and this is a wide literal, so 2 bytes per base64 char — one
+    # `L"..."` blows the limit at ~8190 chars, and silent_extract.ps1 currently
+    # encodes to ~12.8k. The C template is L"@@ENC@@", so emitting
+    # `chunk" L"chunk` yields L"a" L"b" L"c", which the compiler concatenates
+    # AFTER the per-literal check (documented MSVC behaviour for C2026).
+    $chunkSize = 4000
+    $chunks = for ($i = 0; $i -lt $enc.Length; $i += $chunkSize) {
+        $enc.Substring($i, [Math]::Min($chunkSize, $enc.Length - $i))
+    }
+    $encLiteral = $chunks -join '" L"'
+    $cSrc = ([System.IO.File]::ReadAllText($LauncherC)).Replace('@@ENC@@', $encLiteral)
     $cGen = Join-Path $BuildTools 'native_launcher.gen.c'
     [System.IO.File]::WriteAllText($cGen, $cSrc, (New-Object System.Text.ASCIIEncoding))
 
