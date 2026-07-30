@@ -61,6 +61,35 @@ _sam_model_type = None  # "sam3_local" | "sam3" | "langsam" | "owlv2sam2"
 #   - POST /set-sam3-path  API endpoint
 _sam3_local_dir: Optional[Path] = None
 
+# Checkpoint names, newest first — 3.1 is substantially better on aerial imagery.
+_SAM3_CKPTS = ("sam3.1_multiplex.pt", "sam3.pt")
+
+
+def _holds_sam3_weights(p: Path) -> bool:
+    """True if *p* is a usable SAM3 weights location, in either supported layout.
+
+    nested:  <p>/sam3/sam3.pt        — the project bundle (models/ + a sam3/ subdir)
+    flat:    <p>/sam3.pt             — the shared-data layout the silent installer
+                                       points at (<shared>/material_classification/sam3)
+
+    ``_load_sam3`` already probes both layouts for the checkpoint; this predicate
+    exists so the *resolver* agrees with it. It used to require ``(p/"sam3").is_dir()``,
+    which silently rejected the flat layout: a managed install wrote
+    sam3_local_dir=<shared>\\sam3, the resolver looked for <shared>\\sam3\\sam3\\,
+    found nothing, returned None, and SAM3 fell through to samgeo/LangSAM (not
+    installed) and then to an OWLv2+SAM2 HuggingFace download that cannot
+    succeed on an air-gapped box.
+    """
+    try:
+        if not p.exists():
+            return False
+        if (p / "sam3").is_dir():
+            return True
+        return any((p / name).is_file() for name in _SAM3_CKPTS)
+    except OSError:
+        return False
+
+
 def _resolve_sam3_dir() -> Optional[Path]:
     """Return the SAM3 local directory, checking env var and default paths."""
     if _sam3_local_dir is not None:
@@ -72,7 +101,7 @@ def _resolve_sam3_dir() -> Optional[Path]:
         saved = _cfg.get("sam3_local_dir")
         if saved:
             p = Path(saved)
-            if p.exists() and (p / "sam3").is_dir():
+            if _holds_sam3_weights(p):
                 return p
     except Exception:
         pass
@@ -101,7 +130,7 @@ def _resolve_sam3_dir() -> Optional[Path]:
         candidates.insert(2, _exe_dir / "sam3")
 
     for c in candidates:
-        if c.exists() and (c / "sam3").is_dir():
+        if _holds_sam3_weights(c):
             return c
 
     return None
@@ -129,8 +158,18 @@ def get_road_extract_config() -> dict:
     sam3_dir = _resolve_sam3_dir()
     sam3_ckpt = None
     if sam3_dir:
-        ckpt = sam3_dir / "sam3.pt"
-        sam3_ckpt = str(ckpt) if ckpt.exists() else None
+        # Same probe order _load_sam3 uses (nested + flat, 3.1 before 3.0), so the
+        # reported state matches what would actually load.
+        ckpt = next(
+            (c for c in (
+                sam3_dir / "sam3" / "sam3.1_multiplex.pt",
+                sam3_dir / "sam3.1_multiplex.pt",
+                sam3_dir / "sam3" / "sam3.pt",
+                sam3_dir / "sam3.pt",
+            ) if c.exists()),
+            None,
+        )
+        sam3_ckpt = str(ckpt) if ckpt else None
 
     # Check HuggingFace cache for OWLv2+SAM2 models
     hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
