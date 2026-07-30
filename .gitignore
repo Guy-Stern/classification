@@ -63,3 +63,4 @@ Publishes/
 
 # HF weights auto-downloaded at runtime (not committed)
 models/hf_cache/
+.mc_footprint_cache.json
