@@ -111,7 +111,18 @@ try {
         if ($env:MC_SHARED_DIR) { $SharedDir = $env:MC_SHARED_DIR }
         else {
             # <jarvis_root>\tools\material_classification\<version> -> <jarvis_root>\shared\material_classification
-            $jarvisRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $InstallDir))
+            # Walk up defensively: a shallower -InstallDir (e.g. C:\ClassificationApp,
+            # the manual-install default) runs out of parents, and chaining Split-Path
+            # blindly then dies with "Cannot bind argument to parameter 'Path' because
+            # it is an empty string" before the log is even useful.
+            $jarvisRoot = $InstallDir
+            for ($i = 0; $i -lt 3 -and $jarvisRoot; $i++) { $jarvisRoot = Split-Path -Parent $jarvisRoot }
+            if (-not $jarvisRoot) {
+                Fail ("Cannot derive the shared data dir from -InstallDir '{0}'.`n" +
+                      "The default assumes the JARVIS layout " +
+                      "<root>\tools\material_classification\<version>. For any other " +
+                      "location pass -SharedDir explicitly, or set MC_SHARED_DIR." -f $InstallDir)
+            }
             $SharedDir = Join-Path $jarvisRoot 'shared\material_classification'
         }
     }

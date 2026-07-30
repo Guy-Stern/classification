@@ -60,9 +60,13 @@ function Resolve-Version {
 if (-not $Version) { $Version = Resolve-Version }
 Say "version = $Version"
 
-$outDir = Join-Path (Join-Path $root $OutRoot) $Version
+# -OutRoot may be absolute (publish straight onto a dispatch drive) or relative
+# to the repo. Join-Path does NOT resolve an absolute second argument — it would
+# build 'C:\repo\D:\Dispatch' — so branch on it rather than always joining.
+$outRootPath = if ([System.IO.Path]::IsPathRooted($OutRoot)) { $OutRoot } else { Join-Path $root $OutRoot }
+$outDir = Join-Path $outRootPath $Version
 if ((Test-Path -LiteralPath $outDir) -and -not $Force) {
-    Die "Publishes\$Version already exists. Use -Force to overwrite (did you forget to bump VERSION / tag?)."
+    Die "$outDir already exists. Use -Force to overwrite (did you forget to bump VERSION / tag?)."
 }
 
 # -- 2. Build the exes --------------------------------------------------------
