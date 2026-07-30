@@ -48,7 +48,7 @@ if not exist "%SRC%\app\cli.py" (
 :: ── [1/3] Copy CLI files the wrapper doesn't know about ───────────────
 echo.
 echo [1/3] Copying CLI files into %INSTALL_DIR% ...
-for %%F in (cli.py cli_launcher.py sde_conn_test.py ClassificationWebApp.exe MaterialClassification_CLI.exe) do (
+for %%F in (cli.py cli_launcher.py sde_conn_test.py ClassificationWebApp.exe MaterialClassification_CLI.exe CLI_GUIDE.pdf) do (
     if exist "%SRC%\app\%%F" (
         copy /y "%SRC%\app\%%F" "%INSTALL_DIR%\%%F" >nul
         echo   copied  %%F

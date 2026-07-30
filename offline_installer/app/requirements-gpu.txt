@@ -1,7 +1,10 @@
 # GPU acceleration for KMeans — no conda, no CUDA Toolkit install needed.
 #
-# Tested on: NVIDIA RTX A4000 / RTX 3060 (Ampere, compute cap 8.6, CUDA 12.x/13.x drivers)
-# Also works on: RTX 20xx/30xx/40xx, Quadro RTX, A-series workstation GPUs with driver >= 520
+# Tested on: NVIDIA RTX A4000 / RTX 3060 (Ampere, compute cap 8.6)
+# Driver requirement: NVIDIA driver new enough to report "CUDA Version: 12.4"
+# (or newer) in nvidia-smi. Maps to driver >= 551.61 on Windows / 550.54 on Linux.
+#
+# Works on: RTX 20xx/30xx/40xx, Quadro RTX, A-series workstation GPUs.
 #
 # Install:
 #   pip install -r backend/requirements-gpu.txt
@@ -9,14 +12,21 @@
 # After install, restart the backend — the progress bar will show "Engine: GPU (cupy)".
 #
 # ── CuPy GPU arrays ──────────────────────────────────────────────────────────
-# cupy-cuda12x covers CUDA 12.x AND 13.x drivers (RTX A4000, RTX 3060, RTX 40xx etc.)
+# cupy-cuda12x works with any CUDA 12.x runtime that's compatible with the driver.
 # Switch to cupy-cuda11x only if your driver reports "CUDA Version: 11.x" in nvidia-smi.
 cupy-cuda12x
 
 # ── CUDA runtime DLLs (replaces full CUDA Toolkit — only what CuPy needs) ───
-# These are official NVIDIA packages from PyPI (~700 MB total).
+# Official NVIDIA packages from PyPI (~500 MB total).
 # They supply cublas64_12.dll, nvrtc64_120_0.dll, curand64_10.dll, cudart64_12.dll.
-nvidia-cuda-runtime-cu12
-nvidia-cublas-cu12
-nvidia-cuda-nvrtc-cu12
+#
+# Pinned to the CUDA 12.4 series so they run on drivers that report
+# "CUDA Version: 12.4" in nvidia-smi — that's the lowest minor version any of
+# our target A4000 / 30xx / 40xx machines should be on. Newer drivers stay
+# backward-compatible, so 12.4 wheels also run on 12.5 / 12.6 / 12.9 / 13.x
+# drivers without issue. Leaving these unpinned would pull 12.9 wheels which
+# require driver >= 575 and fail on a 12.4-era machine with cudaErrorInsufficientDriver.
+nvidia-cuda-runtime-cu12==12.4.*
+nvidia-cublas-cu12==12.4.*
+nvidia-cuda-nvrtc-cu12==12.4.*
 nvidia-curand-cu12

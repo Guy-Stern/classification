@@ -346,6 +346,11 @@ for %%F in (ClassificationWebApp.exe MaterialClassification_CLI.exe) do (
 
 copy /y "backend\requirements.txt"     "offline_installer\app\requirements.txt"     >nul
 copy /y "backend\requirements-gpu.txt" "offline_installer\app\requirements-gpu.txt" >nul
+
+:: CLI guide — Post-Install.bat copies it out of app\ into the install root, and
+:: the silent installer's app\ copy carries it too. Without this it never reaches
+:: app\, so both paths silently ship without the guide.
+copy /y "docs\CLI_GUIDE.pdf"           "offline_installer\app\CLI_GUIDE.pdf"        >nul 2>&1
 copy /y "STANDALONE_DEPLOYMENT.md"     "offline_installer\STANDALONE_DEPLOYMENT.md" >nul 2>&1
 
 echo 1.0.0 > "offline_installer\app\version.txt"
