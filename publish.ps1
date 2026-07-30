@@ -135,8 +135,11 @@ Set-Content -LiteralPath (Join-Path $outDir 'VERSION') -Value $Version -Encoding
 # The silent installer is NOT standalone: it exits 1 unless the shared data was
 # provisioned first. Ship the provisioning script + its runbook alongside it, or
 # the operator on the target box has the installer and no way to satisfy it.
+# SHARED_SHAPEFILE_CONFIG ships as the rendered PDF (the .md stays the source in
+# docs\); rebuild it after editing with:
+#   .venv\Scripts\python.exe tools\build_cli_guide_pdf.py docs\SHARED_SHAPEFILE_CONFIG.md docs\SHARED_SHAPEFILE_CONFIG.pdf
 foreach ($extra in @('installer_silent\provision_shared.ps1', 'docs\AIRGAP_A4000_DEPLOY.md',
-                     'docs\SHARED_SHAPEFILE_CONFIG.md')) {
+                     'docs\SHARED_SHAPEFILE_CONFIG.pdf')) {
     $src = Join-Path $root $extra
     if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $outDir -Force }
     else { Write-Host "[publish] WARNING: $extra missing - the bundle will not be self-sufficient." }
