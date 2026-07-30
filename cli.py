@@ -131,6 +131,25 @@ Behavior:
   - SDE disabled / no features → SAM3 takes over for roads & buildings
     (water only paints when a water_mask is set).
 
+SHARED CONFIG FOR A FLEET (MC_SHAPEFILE_CONFIG)
+────────────────────────────────────────────────────────────────────────
+Set the machine-scope env var MC_SHAPEFILE_CONFIG to a path (typically a
+UNC share) and that file is used INSTEAD of the local shapefile_config.json
+— edit one file, every box that points at it follows. The local copy is
+ignored while the var is set.
+
+    setx MC_SHAPEFILE_CONFIG "\\\\nas\\gis\\mc\\shapefile_config.json" /M
+
+  - Opt-in per box: the values are PATHS, so a shared copy holds UNC paths
+    that mean nothing on an air-gapped machine. Set it on networked boxes;
+    leave it unset on air-gapped ones and they behave exactly as before.
+  - If the var is set and the file is missing/unreadable/not valid JSON,
+    the run FAILS with that path named. It never falls back to the local
+    file — a box silently running a stale config is the failure this
+    prevents.
+  - Machine scope (/M) and a restart of whatever launches the tool: a
+    running process does not see a new environment variable.
+
 Examples:
 
     python cli.py --input photo.tif --classes 3

@@ -1,7 +1,9 @@
 """Persistent config for 6-material MEA mask priors.
 
 Lives next to ``app_config.json`` (frozen exe dir or repo root in dev)
-so users can edit it directly with any text editor. Two concerns:
+so users can edit it directly with any text editor, OR - when the machine-scope
+``MC_SHAPEFILE_CONFIG`` env var is set - is read from that shared path instead,
+which then WINS over the local file (see ``_ENV_OVERRIDE``). Two concerns:
 
   * ``water_mask`` — a single georeferenced GeoTIFF (band 1 > 0 = water)
     painted directly as BM_WATER. No vector resolve / rasterise.
@@ -13,13 +15,36 @@ so users can edit it directly with any text editor. Two concerns:
     ``Road_Type_Width_Main/SideRoad_m``), else ``road_width_fallback_m``.
 """
 import json
+import os
+from pathlib import Path
 from typing import Any, Dict
 
 from . import config as _app_config
 
 _CONFIG_FILE = _app_config._config_dir() / "shapefile_config.json"
 
+# Optional SHARED config, named by a machine-scope env var. When set it WINS over
+# the local file, so one file on a share drives a whole fleet instead of editing
+# every box (the local copy JARVIS preserves in `.config\` is then ignored).
+#
+# Opt-in per box on purpose: the config is entirely PATHS, so a central copy holds
+# UNC paths that mean nothing on an air-gapped machine. Networked boxes set the
+# var; air-gapped boxes never do and keep today's local-file behaviour exactly.
+#
+# Set but unusable is a HARD ERROR, never a silent fall back to the local file:
+# pointing a box at a shared config and then quietly running a stale local one is
+# the divergence this exists to remove, and it would be invisible in the output.
+_ENV_OVERRIDE = "MC_SHAPEFILE_CONFIG"
+
 _FEATURE_TYPES = ("buildings", "roads")
+
+
+class ShapefileConfigError(RuntimeError):
+    """The shared config named by ``MC_SHAPEFILE_CONFIG`` is missing or unreadable.
+
+    Deliberately fatal — see ``_ENV_OVERRIDE``. Only ever raised when that variable
+    is set; an unset variable keeps the tolerant local-file path.
+    """
 
 # Default skeleton for the optional ``sde`` block. Mirrored in
 # installer_assets/Post-Install.bat's config-template logic so a fresh
@@ -44,6 +69,55 @@ _SDE_DEFAULT: Dict[str, Any] = {
 _cache: Dict[str, Any] | None = None
 
 
+def _merge(cfg: Dict[str, Any], stored: Dict[str, Any]) -> None:
+    """Merge a parsed config document over the defaults already in *cfg*.
+
+    Shared by both sources so a shared config and a local one are interpreted
+    identically - only WHERE the document came from differs.
+    """
+    cfg["water_mask"] = str(stored.get("water_mask") or "").strip()
+    sde_stored = stored.get("sde")
+    if not isinstance(sde_stored, dict):
+        return
+    for key in _SDE_DEFAULT:
+        if key == "layers":
+            layers_stored = sde_stored.get("layers") or {}
+            if isinstance(layers_stored, dict):
+                for ft in _FEATURE_TYPES:
+                    cfg["sde"]["layers"][ft] = str(layers_stored.get(ft) or "")
+        elif key in sde_stored:
+            cfg["sde"][key] = sde_stored[key]
+
+
+def _read_shared(path: Path) -> Dict[str, Any]:
+    """Read the shared config named by ``MC_SHAPEFILE_CONFIG``, or raise.
+
+    Every failure mode is fatal and names the path plus the way out, because the
+    alternative - dropping back to the local file - is exactly the silent
+    divergence the shared config exists to prevent.
+    """
+    hint = (f"Fix the path or the share, or unset {_ENV_OVERRIDE} to use the local "
+            f"{_CONFIG_FILE.name}.")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ShapefileConfigError(
+            f"{_ENV_OVERRIDE} points at {path}, which could not be read: {e}. {hint}"
+        ) from e
+    try:
+        stored = json.loads(text)
+    except ValueError as e:
+        raise ShapefileConfigError(
+            f"{_ENV_OVERRIDE} points at {path}, which is not valid JSON: {e}. {hint}"
+        ) from e
+    if not isinstance(stored, dict):
+        raise ShapefileConfigError(
+            f"{_ENV_OVERRIDE} points at {path}, whose top level is "
+            f"{type(stored).__name__}, not a JSON object. {hint}"
+        )
+    return stored
+
+
 def load() -> Dict[str, Any]:
     """Load shapefile config from disk (cached after first read).
 
@@ -59,43 +133,23 @@ def load() -> Dict[str, Any]:
     cfg["sde"] = dict(_SDE_DEFAULT)
     cfg["sde"]["layers"] = dict(_SDE_DEFAULT["layers"])
 
-    print(f"[debug-config] looking for shapefile_config.json at: {_CONFIG_FILE}")
-    print(f"[debug-config]   exists={_CONFIG_FILE.exists()}  frozen={getattr(__import__('sys'), 'frozen', False)}")
-    if _CONFIG_FILE.exists():
+    # Strip surrounding quotes: `setx MC_SHAPEFILE_CONFIG "\\nas\..."` can store them.
+    override = (os.environ.get(_ENV_OVERRIDE) or "").strip().strip('"')
+    if override:
+        shared = Path(override)
+        _merge(cfg, _read_shared(shared))  # any problem raises - see _ENV_OVERRIDE
+        print(f"[shapefile_config] source: SHARED {shared} (via {_ENV_OVERRIDE})")
+    elif _CONFIG_FILE.exists():
+        # Local file stays TOLERANT (unchanged behaviour): a malformed local config
+        # degrades to defaults rather than stopping an air-gapped box mid-run.
         try:
             with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-                stored = json.load(f)
-            print(f"[debug-config] loaded JSON with top-level keys: {sorted(stored.keys())}")
-            cfg["water_mask"] = str(stored.get("water_mask") or "").strip()
-            print(f"[debug-config] water_mask = {cfg['water_mask']!r}")
-            sde_stored = stored.get("sde")
-            if isinstance(sde_stored, dict):
-                print(f"[debug-config] found 'sde' block with keys: {sorted(sde_stored.keys())}")
-                for key, default in _SDE_DEFAULT.items():
-                    if key == "layers":
-                        layers_stored = sde_stored.get("layers") or {}
-                        if isinstance(layers_stored, dict):
-                            for ft in _FEATURE_TYPES:
-                                cfg["sde"]["layers"][ft] = str(layers_stored.get(ft) or "")
-                    elif key in sde_stored:
-                        cfg["sde"][key] = sde_stored[key]
-                print(f"[debug-config] final sde.enabled         = {cfg['sde'].get('enabled')!r}")
-                print(f"[debug-config] final sde.connection_file = {cfg['sde'].get('connection_file')!r}")
-                print(f"[debug-config] final sde.arcpy_python    = {cfg['sde'].get('arcpy_python')!r}")
-                print(f"[debug-config] final sde.tile_size_metres= {cfg['sde'].get('tile_size_metres')!r}")
-                print(f"[debug-config] final sde.timeout_seconds = {cfg['sde'].get('timeout_seconds')!r}")
-                print(f"[debug-config] final sde.road_width_attr = {cfg['sde'].get('road_width_attr')!r}")
-                print(f"[debug-config] final sde.Road_Type_Attr  = {cfg['sde'].get('Road_Type_Attr')!r}")
-                print(f"[debug-config] final sde.RT_MainRoad key/w= {cfg['sde'].get('Road_Type_Key_MainRoad')!r} / {cfg['sde'].get('Road_Type_Width_MainRoad_m')!r}")
-                print(f"[debug-config] final sde.RT_SideRoad key/w= {cfg['sde'].get('Road_Type_Key_SideRoad')!r} / {cfg['sde'].get('Road_Type_Width_SideRoad_m')!r}")
-                print(f"[debug-config] final sde.road_width_fb_m = {cfg['sde'].get('road_width_fallback_m')!r}")
-                print(f"[debug-config] final sde.layers          = {cfg['sde'].get('layers')!r}")
-            else:
-                print(f"[debug-config] no 'sde' block in JSON — using defaults (enabled=False)")
+                _merge(cfg, json.load(f))
+            print(f"[shapefile_config] source: local {_CONFIG_FILE}")
         except Exception as e:
-            print(f"[shapefile_config] failed to read {_CONFIG_FILE}: {e}")
+            print(f"[shapefile_config] failed to read {_CONFIG_FILE}: {e} - using defaults")
     else:
-        print(f"[debug-config] file NOT FOUND — SDE config will be at defaults (enabled=False)")
+        print(f"[shapefile_config] no config at {_CONFIG_FILE} - using defaults (sde.enabled=False)")
 
     _cache = cfg
     return cfg
@@ -106,6 +160,12 @@ def save(updates: Dict[str, Any]) -> Dict[str, Any]:
 
     Accepts updates for feature-type path lists and/or the ``sde`` block.
     Unknown keys are ignored.
+
+    NOTE: always writes the LOCAL ``_CONFIG_FILE``, never the shared config - a
+    box must not rewrite a file the whole fleet reads. Currently uncalled; if it
+    is ever wired to an endpoint, refuse the write (or warn) while
+    ``MC_SHAPEFILE_CONFIG`` is set, or the save will appear to succeed and then
+    be ignored by the next ``load()``.
     """
     global _cache
     cfg = load()
