@@ -135,7 +135,8 @@ Set-Content -LiteralPath (Join-Path $outDir 'VERSION') -Value $Version -Encoding
 # The silent installer is NOT standalone: it exits 1 unless the shared data was
 # provisioned first. Ship the provisioning script + its runbook alongside it, or
 # the operator on the target box has the installer and no way to satisfy it.
-foreach ($extra in @('installer_silent\provision_shared.ps1', 'docs\AIRGAP_A4000_DEPLOY.md')) {
+foreach ($extra in @('installer_silent\provision_shared.ps1', 'docs\AIRGAP_A4000_DEPLOY.md',
+                     'docs\SHARED_SHAPEFILE_CONFIG.md')) {
     $src = Join-Path $root $extra
     if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $outDir -Force }
     else { Write-Host "[publish] WARNING: $extra missing - the bundle will not be self-sufficient." }
