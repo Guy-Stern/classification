@@ -99,7 +99,9 @@ def _read_shared(path: Path) -> Dict[str, Any]:
     hint = (f"Fix the path or the share, or unset {_ENV_OVERRIDE} to use the local "
             f"{_CONFIG_FILE.name}.")
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig: a shared config on a network share is operator-edited,
+        # and Notepad/PowerShell on Windows add a UTF-8 BOM.
+        text = path.read_text(encoding="utf-8-sig")
     except OSError as e:
         raise ShapefileConfigError(
             f"{_ENV_OVERRIDE} points at {path}, which could not be read: {e}. {hint}"
@@ -143,7 +145,9 @@ def load() -> Dict[str, Any]:
         # Local file stays TOLERANT (unchanged behaviour): a malformed local config
         # degrades to defaults rather than stopping an air-gapped box mid-run.
         try:
-            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            # utf-8-sig: the silent installer writes this from PS 5.1, whose
+            # `Set-Content -Encoding UTF8` emits a BOM (see config.py).
+            with open(_CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                 _merge(cfg, json.load(f))
             print(f"[shapefile_config] source: local {_CONFIG_FILE}")
         except Exception as e:

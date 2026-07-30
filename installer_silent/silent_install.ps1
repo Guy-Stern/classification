@@ -68,6 +68,17 @@ function Write-Log {
 }
 function Fail { param([string]$Message); Write-Log $Message 'ERROR'; Write-Log 'INSTALL FAILED.' 'ERROR'; exit 1 }
 
+function Write-Utf8NoBom {
+    # Windows PowerShell 5.1's `Set-Content -Encoding UTF8` writes a BOM, and
+    # Python's json.load on a plain utf-8 handle dies on it ("Unexpected UTF-8
+    # BOM"). That silently cost us app_config.json - the config fell back to
+    # defaults, sam3_local_dir was lost, and SAM3 degraded to an HF download
+    # that cannot succeed on an air-gapped box. These files are also in
+    # $PRESERVE_FILES, so a BOM written once survives every later upgrade.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Invoke-Native {
     param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$Arguments,
           [Parameter(Mandatory)][string]$What, [switch]$NonFatal)
@@ -263,7 +274,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     $appCfg = Join-Path $InstallDir 'app_config.json'
     if (-not (Test-Path -LiteralPath $appCfg)) {
         $cfg = [ordered]@{ sam3_local_dir = $sam3Dir; hf_cache_dir = $hfCache; offline_mode = $true }
-        ($cfg | ConvertTo-Json) | Set-Content -LiteralPath $appCfg -Encoding UTF8
+        Write-Utf8NoBom $appCfg ($cfg | ConvertTo-Json)
         Write-Log ("created  app_config.json (sam3_local_dir + hf_cache_dir -> shared)")
     }
     else { Write-Log 'PRESERVE: app_config.json exists - left untouched.' }
@@ -272,7 +283,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     $shpExampleSrc = Join-Path $assets 'shapefile_config.example.json'
     if (-not (Test-Path -LiteralPath $shpCfg)) {
         if (Test-Path -LiteralPath $shpExampleSrc) { Copy-Item -LiteralPath $shpExampleSrc -Destination $shpCfg -Force; Write-Log 'created  shapefile_config.json (from example)' }
-        else { '{ "buildings": [], "roads": [], "water": [] }' | Set-Content -LiteralPath $shpCfg -Encoding UTF8; Write-Log 'created  shapefile_config.json (empty)' }
+        else { Write-Utf8NoBom $shpCfg '{ "buildings": [], "roads": [], "water": [] }'; Write-Log 'created  shapefile_config.json (empty)' }
     }
     else { Write-Log 'PRESERVE: shapefile_config.json exists - left untouched.' }
     if (Test-Path -LiteralPath $shpExampleSrc) { Copy-Item -LiteralPath $shpExampleSrc -Destination (Join-Path $InstallDir 'shapefile_config.example.json') -Force }

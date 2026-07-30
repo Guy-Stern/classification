@@ -42,7 +42,7 @@ _LEGACY_TO_PARENT: Dict[str, str] = {
 
 def _load_factory_defaults() -> Dict[str, Any]:
     try:
-        return json.loads(_FACTORY_DEFAULT_PATH.read_text(encoding="utf-8"))
+        return json.loads(_FACTORY_DEFAULT_PATH.read_text(encoding="utf-8-sig"))
     except Exception as e:
         print(f"[mea_profile] Warning: failed to read factory defaults: {e}")
         return {}
@@ -90,7 +90,7 @@ def load_active_profile() -> Dict[str, Any]:
     """
     if _SHARED_PROFILE_PATH.exists():
         try:
-            user = json.loads(_SHARED_PROFILE_PATH.read_text(encoding="utf-8"))
+            user = json.loads(_SHARED_PROFILE_PATH.read_text(encoding="utf-8-sig"))
             user = _migrate_legacy_profile(user)
             factory = _load_factory_defaults()
             merged = _merge_profile(factory, user)
@@ -108,7 +108,7 @@ def profile_status() -> Dict[str, Any]:
     """Return a lightweight status dict for GET /mea-profile/status."""
     if _SHARED_PROFILE_PATH.exists():
         try:
-            user = json.loads(_SHARED_PROFILE_PATH.read_text(encoding="utf-8"))
+            user = json.loads(_SHARED_PROFILE_PATH.read_text(encoding="utf-8-sig"))
             user = _migrate_legacy_profile(user)
             mat_count = len(user.get("material_overrides", {}))
             return {

@@ -50,7 +50,15 @@ def load() -> Dict[str, Any]:
     cfg = dict(_DEFAULTS)
     if _CONFIG_FILE.exists():
         try:
-            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            # utf-8-sig, not utf-8: the silent installer writes this file from
+            # PowerShell, and PS 5.1's `Set-Content -Encoding UTF8` emits a BOM.
+            # Plain utf-8 then dies on "Unexpected UTF-8 BOM", the config falls
+            # back to defaults, sam3_local_dir is lost, and SAM3 silently
+            # degrades to an HF download that cannot work on an air-gapped box.
+            # utf-8-sig reads BOM and BOM-less files alike. The file is in the
+            # installer's PRESERVE list, so a BOM written once would otherwise
+            # survive every future upgrade.
+            with open(_CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                 stored = json.load(f)
             cfg.update({k: v for k, v in stored.items() if k in _DEFAULTS})
         except Exception as e:

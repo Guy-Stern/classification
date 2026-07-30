@@ -112,7 +112,7 @@ $recipe = [ordered]@{
 }
 
 $json = $recipe | ConvertTo-Json -Depth 4
-Set-Content -LiteralPath $OutFile -Value $json -Encoding UTF8
+[System.IO.File]::WriteAllText($OutFile, $json, (New-Object System.Text.UTF8Encoding($false)))  # no BOM: JARVIS/Python read this
 Write-Host "[make-recipe] wrote $OutFile"
 
 # -- Convenience: print the artifact sha256 (JARVIS hashes it server-side; this
